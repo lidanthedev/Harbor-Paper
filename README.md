@@ -41,9 +41,20 @@ backgrounded daemon running — the daemon is killed before it can even write it
 log. Without it, `cmd &` survives the one-shot session as expected. Before
 detaching, a pre-flight run starts the service for ~3s and kills it, so a
 genuine startup failure (port in use, bad host key) lands in
-`/root/.harbor/dropbear.log` and is reported inline by `/harbor dropbear`.
+`/root/.harbor/dropbear.log` and is reported inline by `/harbor dropbear start`.
 
-`/harbor dropbear` re-runs it on demand, `/harbor dropbear off` stops it.
+Dropbear is controlled by subcommands, so a restart never re-does package or key
+work:
+
+| Command | Does |
+|---|---|
+| `/harbor dropbear start` | kill + relaunch with the existing host key (fast) |
+| `/harbor dropbear reinstall` | packages + host keys + `dropbearconvert` + `authorized_keys`, then start |
+| `/harbor dropbear stop` | kill dropbear |
+
+`start` on a rootfs that has never been set up falls back to `reinstall`
+automatically. Note that `start`/`stop` drop any **active** SSH session — the
+process being killed is the one serving it.
 
 Add your client's public key to config and you get passwordless SSH:
 
@@ -103,7 +114,7 @@ minirootfs + apk-tools-static + proot static) and runs
 /sh ls -la /root
 /harbor status
 /harbor boot
-/harbor dropbear
+/harbor dropbear start
 ```
 
 Each `/sh` is one-shot: `proot --rootfs=... --link2symlink

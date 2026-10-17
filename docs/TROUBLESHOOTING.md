@@ -42,6 +42,7 @@ plugin rootfs at `plugins/Harbor/container`.
 | 17 | Dropbear | No portable way to "try it for 3 seconds" |
 | 18 | Dropbear | Port not reachable from outside even when bound |
 | 19 | Access | `/sh` had no permission gate |
+| 20 | Daemon | The restart command killed the session it was typed into |
 
 ---
 
@@ -354,8 +355,8 @@ Current proot args:
 
 **Consequence to be aware of.** With the flag gone, *anything* you background now
 outlives its `/sh`. That is exactly what dropbear needs, but it also means an
-accidental `/sh sleep 999 &` will linger. `/harbor dropbear off` still cleans up
-dropbear specifically (`pkill -f dropbear`).
+accidental `/sh sleep 999 &` will linger. `/harbor dropbear stop` still cleans up
+dropbear specifically (`pkill -x dropbear`).
 
 **How it was reasoned about.** proot 5.5 dropped `--kill-on-exit` from its manual,
 so we read the semantics of the flag as pinned (proot 5.3.0, which we ship) and
@@ -415,7 +416,7 @@ the new one returned in ~26 ms with the service detached and still running.
 `dropbearkey` needs. This is a known quirk of the unprivileged path.
 
 **Fix.** Generate host keys with **OpenSSH** instead, which works, then convert
-them (next problem). `Dropbear.setup()` runs `ssh-keygen -A`, with a targeted
+them (next problem). `Dropbear.reinstall()` runs `ssh-keygen -A`, with a targeted
 fallback:
 
 ```java
@@ -459,7 +460,7 @@ manager.execShell("apk add --no-cache dropbear dropbear-convert openssh-keygen")
 manager.execShell("dropbearconvert openssh dropbear " + srcKey + " " + dstKey);
 ```
 
-`Dropbear.setup()` checks `hasBinary("dropbearconvert")` and `hasBinary("ssh-keygen")`
+`Dropbear.reinstall()` checks `hasBinary("dropbearconvert")` and `hasBinary("ssh-keygen")`
 and records a note if either is still missing, rather than failing silently.
 
 ### Problem 14 — `authorized_keys` read from the wrong home
@@ -551,7 +552,7 @@ execInRootfsSafe("{ " + command + " </dev/null >>" + log + " 2>&1 & "
 - The log is truncated (`: >`) before the pre-flight and **appended** (`>>`) by
   both runs, so you get the pre-flight error *and* the live daemon's output.
 
-`/harbor dropbear` reports the log **inline** on failure, so the operator sees the
+`/harbor dropbear start` reports the log **inline** on failure, so the operator sees the
 actual reason (e.g. `Address in use`) without a second command.
 
 ### Problem 18 — Port not reachable from outside even when bound
@@ -593,6 +594,60 @@ Ops get it by default. `/harbor …` is gated on `harbor.admin`.
 
 ---
 
+## Operating the daemon
+
+### Problem 20 — The restart command killed the session it was typed into
+
+**Symptom.** Restarting or stopping dropbear dropped the very SSH session the
+command was run from, and the follow-up cleanup never ran.
+
+**Cause.** The kill was `pkill -f 'dropbear .*-p <port>'`. `-f` matches the
+**whole command line**, so that pattern also matched:
+
+- the dropbear serving the current session, plus every per-connection child
+  (they inherit the same argv);
+- the **proot launcher**, whose argv literally contains the string
+  `nohup dropbear … -p <port> …`;
+- any shell whose command line quotes the pattern — including the `sh -c` that
+  is running the `pkill` itself.
+
+So the command shot its own caller, and the `rm -f` scheduled after it never ran.
+Restarting dropbear always drops existing sessions (unavoidable — you are killing
+the process serving them), but it must not also take out unrelated processes or
+itself.
+
+**Fix.** Kill precisely, never by a fuzzy argv pattern:
+
+```sh
+[ -f /root/.harbor/dropbear.pid ] && kill "$(cat /root/.harbor/dropbear.pid)" 2>/dev/null
+sleep 1
+pkill -x dropbear 2>/dev/null   # exact process name: strays only
+rm -f /root/.harbor/dropbear.pid
+```
+
+`pkill -x dropbear` matches the process **name** exactly, so it cannot match a
+shell, a proot launcher, or the `pkill` invocation itself.
+
+**Related change — restart is not reinstall.** The single `/harbor dropbear`
+command used to re-run the entire setup (packages, host keys, conversion,
+`authorized_keys`) every time. It is now split so a restart is cheap:
+
+| Command | Does |
+|---|---|
+| `/harbor dropbear start` | kill + relaunch with the existing host key |
+| `/harbor dropbear reinstall` | packages + host keys + `dropbearconvert` + `authorized_keys`, then start |
+| `/harbor dropbear stop` | kill dropbear |
+
+A bare `/harbor dropbear` now prints usage. `start` on a rootfs that was never
+set up returns `needsSetup` and the caller falls back to `reinstall`, so boot
+stays self-healing without doing package work on every restart.
+
+**Lesson.** `pkill -f <pattern>` is a foot-gun when the pattern can appear in
+other processes' argv — including your own. Prefer pid files, or `pkill -x` on a
+process name.
+
+---
+
 ## Verification performed
 
 | Check | Result |
@@ -620,9 +675,9 @@ Ops get it by default. `/harbor …` is gated on `harbor.admin`.
   background a service via `startup-commands`.
 - **dropbear does not self-revive across a container restart.** It is started
   once per Harbor boot. If the *container* restarts (not just the server), run
-  `/harbor dropbear` (or restart the server so boot tasks re-run).
+  `/harbor dropbear start` (or restart the server so boot tasks re-run).
 - **Backgrounded processes now outlive their `/sh`** (by design, post-Problem 9).
-  Clean up stray ones yourself, or `/harbor dropbear off` for dropbear.
+  Clean up stray ones yourself, or `/harbor dropbear stop` for dropbear.
 - **`startup-commands` use a fixed 300 s timeout**, unlike `/sh` which is
   unlimited. Fine for typical boot tasks; worth revisiting if you need an
   unlimited boot command.

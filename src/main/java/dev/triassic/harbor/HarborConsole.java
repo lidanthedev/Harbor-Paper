@@ -39,6 +39,15 @@ public final class HarborConsole {
     private final long startupStartedAt = System.currentTimeMillis();
     /** What the pass is doing right now, for /harbor status and the heartbeat. */
     private final AtomicReference<String> startupPhase = new AtomicReference<>("starting up");
+    /**
+     * How long the pass took, frozen when it finishes (-1 while it runs).
+     * "complete in Ns" has to be the duration: it used to be recomputed as
+     * now - startupStartedAt on every /harbor status, so a boot that took 20 s
+     * still answered "complete in 719s" twelve minutes later, and the number
+     * kept climbing. Written before `starting` flips, read after it, so the
+     * volatile write/read of `starting` publishes this value.
+     */
+    private volatile long bootSeconds = -1;
 
     public HarborConsole(HarborManager manager, Dropbear dropbear, HarborBoot boot) {
         this.manager = manager;
@@ -48,6 +57,7 @@ public final class HarborConsole {
 
     /** Called by the background startup pass once install + boot are done. */
     public void startingDone() {
+        bootSeconds = (System.currentTimeMillis() - startupStartedAt) / 1000;
         starting.set(false);
     }
 
@@ -283,14 +293,21 @@ public final class HarborConsole {
 
     /**
      * "in progress (62s) - setting up dropbear (SSH)" while the background pass
-     * runs, "complete in 137s" afterwards. The startup heartbeat tells you to run
+     * runs, "complete in 21s" afterwards. The startup heartbeat tells you to run
      * /harbor status; before this, status said nothing at all about the pass.
+     *
+     * The finished number is the pass duration, not the age of the JVM. It used
+     * to be recomputed live, so a boot that really took 20 s answered "complete
+     * in 719s" twelve minutes in - which read as a 12-minute boot that never
+     * happened.
      */
     private String startupStatus() {
-        long seconds = (System.currentTimeMillis() - startupStartedAt) / 1000;
-        return starting.get()
-                ? "in progress (" + seconds + "s) - " + startupPhase.get()
-                : "complete in " + seconds + "s";
+        if (starting.get()) {
+            long seconds = (System.currentTimeMillis() - startupStartedAt) / 1000;
+            return "in progress (" + seconds + "s) - " + startupPhase.get();
+        }
+        long seconds = bootSeconds;
+        return "complete in " + (seconds < 0 ? 0 : seconds) + "s";
     }
 
     private static void out(String s) {

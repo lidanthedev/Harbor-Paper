@@ -238,6 +238,13 @@ java -jar server.jar
 - The console is usable immediately. A first-run install runs in the background
   and prints its progress (`Downloading Alpine minirootfs …`, `Installing base
   system …`); commands typed while it runs tell you it is still working.
+- **Panels that wait for a `Done (Ns)!` line.** Pterodactyl only flips a server
+  to "running" when the console prints the Minecraft-style
+  `Done (x.xxs)! For help, type "help"`, which standalone Harbor never emits, so
+  the panel sits on `starting` (cosmetic; Stop still works — see Problem 28). Set
+  `panel-done-line: 'Done (%ds)! For help, type "help"'` and Harbor prints it
+  itself when the boot pass ends, with the **real** elapsed time, so nobody has
+  to fake the number with a `startup-commands` echo.
 - `silent: true` keeps Harbor's routine chatter off *after* boot; the `$ command`
   echo, the command output, and install/boot progress always show, since the
   console is the interface.
@@ -259,6 +266,7 @@ command-timeout-seconds: 0        # 0 = no timeout
 dns: ["1.1.1.1", "1.0.0.1"]
 dropbear: { enabled: true, port: 25584, authorized-key: "", allow-password-login: false }
 startup-commands: ["echo harbor booted at $(date)"]
+panel-done-line: ""               # e.g. 'Done (%ds)! For help, type "help"'; %d = real boot seconds
 ```
 
 Bump versions together to track Alpine releases. Upstream pins are kept as

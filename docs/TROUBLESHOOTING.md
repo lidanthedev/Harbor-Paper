@@ -53,6 +53,8 @@ plugin rootfs at `plugins/Harbor/container`.
 | 28 | Standalone | The panel's Stop button did nothing (`stop` / `end`) |
 | 29 | Dropbear | SSH worked for five minutes after boot, then refused every login |
 | 30 | Standalone | The heartbeat said "/harbor status to check", but status knew nothing |
+| 31 | Standalone | `/harbor status` reported a 12-minute boot that never happened |
+| 32 | Standalone | The panel never left "starting", and the fake `Done (...)` line lied |
 
 ---
 
@@ -1255,7 +1257,9 @@ Installed: true
 Boot: in progress (62s) - setting up dropbear (SSH)
 ```
 
-or `Boot: complete in 137s` once the pass is over. `/harbor boot` also passes a
+or `Boot: complete in 137s` once the pass is over — and that number is now
+frozen at the pass duration (Problem 31), so it no longer keeps counting up.
+`/harbor boot` also passes a
 progress sink now, so a manual boot prints the same phase lines instead of
 sitting silent for seconds. The boot phase lines themselves got finer: the
 dropbear setup logs its slow steps (packages, host key, conversion,
@@ -1264,6 +1268,93 @@ rootfs.
 
 **Verified.** `Harbor-1.1.3.jar` locally: `/harbor status` prints
 `Boot: complete in 0s`, and `stop`/`end` still exit cleanly.
+
+### Problem 31 — `/harbor status` reported a 12-minute boot that never happened
+
+**Symptom.** After a restart the operator ran `/harbor status` and got
+
+```
+Installed: true
+Boot: complete in 719s
+```
+
+even though dropbear had been listening within ~10 s of the JVM starting, SSH
+logins worked, and the console answered immediately. Running the same command
+again minutes later showed a *larger* number — 1088s — still "complete in". It
+was reported as "the boot takes 12 minutes", next to the genuine Problem 29
+symptom.
+
+**Cause.** `startupStatus()` used one live counter for both branches:
+
+```java
+long seconds = (System.currentTimeMillis() - startupStartedAt) / 1000;
+return starting.get()
+        ? "in progress (" + seconds + "s) - " + startupPhase.get()
+        : "complete in " + seconds + "s";
+```
+
+`startupStartedAt` is captured when the console is constructed, i.e. at JVM
+start, and is never frozen. While the pass runs that is the right thing to
+measure; after it ends the same expression is **JVM uptime**, so "complete in
+Ns" kept growing for the life of the process. The phase text was correct — only
+the duration measured the wrong interval, and since the heartbeat sends the
+operator to `/harbor status`, the wrong number was the one they saw.
+
+**Fix.** The duration is measured once, when the pass ends, and frozen there:
+
+```java
+public void startingDone() {
+    bootSeconds = (System.currentTimeMillis() - startupStartedAt) / 1000;
+    starting.set(false);
+}
+```
+
+`bootSeconds` is `volatile`, written before the `starting` flip, whose volatile
+read publishes it; the completed branch prints it (guarding the `-1` "still
+running" sentinel). A running pass is unchanged: `in progress (Ns) - <phase>`,
+still advancing. `Boot: complete in 21s` now means the pass took 21 s and stays
+21 s.
+
+**Verified.** `Harbor-1.1.4.jar`, live: the boot pass after a restart reported
+its real duration, and repeated `/harbor status` calls returned the identical
+value instead of a growing one.
+
+### Problem 32 — the panel never left "starting", and the fake `Done (...)` line lied
+
+**Symptom.** In standalone mode the server was healthy — dropbear listening,
+console answering, commands running — but the panel kept the server in
+`starting` (`current_state` never returned to `running`), so the UI looked stuck.
+
+**Cause.** Pterodactyl marks a server as started by matching the egg's startup
+line in the console output, and the Minecraft-family eggs match the vanilla
+`Done (x.xxs)! For help, type "help"`. A standalone Harbor prints no such line,
+so the match never fires however well the box is running. The workaround was a
+`startup-commands` entry echoing the line with a hardcoded number:
+
+```yaml
+startup-commands:
+  - "echo 'Done (10s)! For help, type'"
+```
+
+which made the panel flip to `running` — but the 10 s was invented, so the
+console then contradicted itself on a box whose boot took 20 s (or minutes on a
+first run).
+
+**Fix.** Harbor prints the line itself, with the real time:
+
+```yaml
+panel-done-line: 'Done (%ds)! For help, type "help"'
+```
+
+`%d` is measured from the start of the background pass (install included) to the
+end of the boot. The line goes to stdout raw, with no `[Harbor]` prefix, because
+the panel matches the console text as-is. Empty (default) prints nothing, so
+existing installs are unaffected. Standalone only: in plugin mode Paper prints
+its own `Done (…)`. Delete the echoing `startup-commands` entry when you set it.
+
+**Verified.** `Harbor-1.1.4.jar`, live: with the option set, the boot end prints
+`Done (Ns)! For help, type "help"` with the pass's real seconds and the panel
+leaves `starting`; with `panel-done-line: ""` nothing extra is printed.
 
 ---
 
@@ -1312,13 +1403,15 @@ rootfs.
 - **Stale configs.** New config keys are not injected into an existing
   `plugins/Harbor/config.yml`; code defaults keep things working, but append the
   keys or delete the file to see them.
-- **The panel keeps showing "starting" in standalone mode.** Pterodactyl decides
-  the server is up when the egg's startup line appears, and the standard
-  Minecraft eggs look for `Done (x.xxs)! For help, type "help"`. A standalone
-  Harbor never prints that, so the panel stays in `starting` even though the
-  console is fully usable. Cosmetic, and stopping is handled properly: the panel
-  sends `stop` (or `end` on the Velocity egg) and Harbor exits cleanly —
-  see Problem 28.
+- **The panel keeps showing "starting" in standalone mode unless you ask for the
+  startup line.** Pterodactyl decides the server is up when the egg's startup
+  line appears, and the standard Minecraft eggs look for
+  `Done (x.xxs)! For help, type "help"`. A standalone Harbor prints no such line
+  (plugin mode is fine — Paper prints its own). Cosmetic, and stopping works
+  either way: the panel sends `stop` (or `end` on the Velocity egg) and Harbor
+  exits cleanly — see Problem 28. To leave `starting`, set
+  `panel-done-line: 'Done (%ds)! For help, type "help"'` and Harbor prints it
+  itself, with the real boot time, when the pass ends (Problem 32).
 - **Standalone mode leaves one zombie per `detach()`.** The 3-second pre-flight
   (Problem 17) starts a daemon and kills it; the JVM is PID 1 in a container, so
   it inherits the orphan and cannot reap a process it did not spawn

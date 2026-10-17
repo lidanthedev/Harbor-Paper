@@ -96,6 +96,7 @@ public final class HarborMain {
                 console.startupPhase("installing the rootfs");
             }
             Thread heartbeat = startStartupHeartbeat(console);
+            boolean booted = false;
             try {
                 if (firstRun && !manager.ensureInstalled()) {
                     System.out.println("[Harbor] install FAILED - see above; retry with /harbor install");
@@ -113,6 +114,7 @@ public final class HarborMain {
                         System.out.println(report.dropbearLine);
                         System.out.flush();
                     }
+                    booted = true;
                 }
             } catch (Throwable t) {
                 System.out.println("[Harbor] startup failed: " + t);
@@ -124,6 +126,12 @@ public final class HarborMain {
                 if (took >= 30) {
                     System.out.println("[Harbor] startup finished after " + took + "s");
                     System.out.flush();
+                }
+                // A hosting panel only marks the server "running" when it sees the
+                // Minecraft-style "Done (Ns)!" line. Print it ourselves, with the
+                // real elapsed time, instead of faking one with a startup command.
+                if (booted) {
+                    emitPanelDoneLine(config, took);
                 }
                 logger.setLevel(silent ? Level.INFO : Level.ALL);
                 console.startingDone();
@@ -183,6 +191,22 @@ public final class HarborMain {
 
     private static void println(String s) {
         System.out.println(s);
+        System.out.flush();
+    }
+
+    /**
+     * Print the hosting panel's startup line ("Done (Ns)! For help, type ...")
+     * with the real elapsed time once the boot pass is done, so the server
+     * leaves "starting" in the panel without a startup command faking the
+     * number. Raw stdout with no prefix: the panel matches the console text.
+     * Template from `panel-done-line`, %d = seconds; blank (default) = off.
+     */
+    private static void emitPanelDoneLine(HarborConfig config, long seconds) {
+        String template = config.getString("panel-done-line", "");
+        if (template == null || template.isBlank()) {
+            return;
+        }
+        System.out.println(template.replace("%d", Long.toString(Math.max(0, seconds))));
         System.out.flush();
     }
 

@@ -83,3 +83,20 @@ startup-commands:
   - "echo harbor booted at $(date)"
   # - "dropbear -E -K 60 -p 25584 -r /etc/dropbear/dropbear_ed25519_host_key"
   # - "python3 -m http.server 8000 --directory /root"
+
+# ---------------------------------------------------------------------------
+# Hosting panels (Pterodactyl and friends) decide a server is "running" when the
+# console prints the Minecraft-style "Done (Ns)!" line, and the standard eggs
+# match exactly that text. A standalone Harbor never prints one, so the panel
+# sits on "starting" forever. Rather than faking it with a startup-command (a
+# fixed number that is a lie), set the line here, with %d where the elapsed
+# seconds go, and Harbor prints it itself when the boot pass finishes:
+#
+#   panel-done-line: 'Done (%ds)! For help, type "help"'
+#
+# %d is the real time from the start of the pass to the end of the boot, so the
+# number in the panel's console is true. The line is printed raw, with no
+# "[Harbor]" prefix, because the panel matches the console text as-is.
+# Empty (default) prints nothing. Standalone mode only.
+# ---------------------------------------------------------------------------
+panel-done-line: ""

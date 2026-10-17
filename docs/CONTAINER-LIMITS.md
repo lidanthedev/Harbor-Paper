@@ -19,7 +19,7 @@ contained is the outer container's capability/seccomp profile — not proot.
 | Real uid/gid | `999:987` (proot `--root-id` fakes `0`) |
 | Effective capabilities | **none** (`CapEff=0`); bounding set `0xe1` (CHOWN, KILL, SETGID, SETUID) — unusable |
 | Seccomp | **enabled** (mode 2, 1 filter); `NoNewPrivs=1` |
-| `mount` / `unshare` / `mknod` | **denied** (EPERM, or silently swallowed) |
+| `mount` / `unshare` (incl. user ns) / `mknod` | **denied** (EPERM, or silently swallowed) |
 | `chroot` | returns 0 but is **proot-emulated** — no real change |
 | `/sys`, `/proc/sys` | **read-only** |
 | Namespaces | **identical to PID 1** for every type; net = **host initial netns** |
@@ -58,6 +58,7 @@ Consequences, tested:
 |---|---|
 | `mount -t tmpfs none /mnt` | `Permission denied` (rc 255) |
 | `unshare -m` / `-u` / `-p -f` | `Operation not permitted` |
+| `unshare -U` (user namespace) | `Permission denied` — **no user-namespace escape**, even though `unprivileged_userns_clone=1` |
 | `mknod` | rc 0 but **no node is created** (proot swallows it) |
 | `sysctl -w kernel.hostname=x` | `Read-only file system` |
 | `hostname foo` | rc 0, hostname **unchanged** (proot swallows it) |
@@ -186,6 +187,8 @@ Reachability from the session:
 | `127.0.0.1:7101` | open (HTTP service, returns 404) |
 | `127.0.0.1:8081` | open |
 | `172.17.0.1:2375/2376/8080/443` | closed (no Docker API exposure) |
+| `62.141.62.23:22` / `:8081` / `:3111` | **open** (host sshd, panel service, our dropbear) |
+| `62.141.62.23:7101` | closed (loopback-only) |
 | `github.com:22` | **open** |
 | `smtp.gmail.com:25 / 587 / 465` | **open** |
 | `1.1.1.1:53 / 80 / 443 / 8080` | **open** |
@@ -242,8 +245,10 @@ invokes the `timeout` binary — timeouts are enforced Java-side in
   credentials in the rootfs assuming they cannot be exfiltrated.
 * **High ports only.** dropbear (and any other listener) must use `>= 1024`;
   the default `25584`/`3111` are correct.
-* **No TUN, no mounts, no device nodes, no privileged ports, IPv4-only.** VPN
-  setups that need any of these will not work.
+* **No TUN, no mounts, no device nodes, no privileged ports, no user
+  namespaces, IPv4-only.** `unshare -U` is denied, so you cannot build a nested
+  namespace to gain mount rights; VPN setups that need any of these will not
+  work.
 * **Size from cgroup, not from `nproc`/`free`.** 2 CPUs and 3.3 GiB, not 32 CPUs
   and 131 GB.
 

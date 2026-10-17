@@ -3,7 +3,6 @@ package dev.triassic.harbor;
 import java.io.File;
 import java.io.InputStream;
 import java.nio.file.Files;
-import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Formatter;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -91,17 +90,24 @@ public final class HarborMain {
             // What the heartbeat says we are doing. A boot that spends minutes
             // bringing dropbear up used to keep announcing "installing the
             // rootfs", which reads as a stuck install when the rootfs is in fact
-            // installed and dropbear is already listening.
-            AtomicReference<String> phase = new AtomicReference<>("installing the rootfs");
-            Thread heartbeat = startStartupHeartbeat(phase);
+            // installed and dropbear is already listening. The phase is kept in
+            // HarborConsole so /harbor status reports the same thing.
+            if (firstRun) {
+                console.startupPhase("installing the rootfs");
+            }
+            Thread heartbeat = startStartupHeartbeat(console);
             try {
                 if (firstRun && !manager.ensureInstalled()) {
                     System.out.println("[Harbor] install FAILED - see above; retry with /harbor install");
                     System.out.flush();
                 }
                 if (manager.isInstalled()) {
-                    phase.set("setting up dropbear + startup commands");
-                    HarborBoot.BootReport report = boot.run(HarborMain::println);
+                    // Each progress line the boot pass prints also becomes the
+                    // current phase, so the heartbeat stays truthful.
+                    HarborBoot.BootReport report = boot.run(line -> {
+                        console.startupPhase(phaseOf(line));
+                        println(line);
+                    });
                     // The dropbear line is the SSH entry point: always show it.
                     if (report.dropbearLine != null) {
                         System.out.println(report.dropbearLine);
@@ -142,13 +148,13 @@ public final class HarborMain {
      * every 30s, naming the phase, so the console shows whether the process is
      * alive and what it is doing.
      */
-    private static Thread startStartupHeartbeat(AtomicReference<String> phase) {
+    private static Thread startStartupHeartbeat(HarborConsole console) {
         long start = System.currentTimeMillis();
         Thread heartbeat = new Thread(() -> {
             try {
                 while (true) {
                     Thread.sleep(30_000);
-                    System.out.println("[Harbor] still " + phase.get() + " ... "
+                    System.out.println("[Harbor] still " + console.startupPhase() + " ... "
                             + (System.currentTimeMillis() - start) / 1000
                             + "s elapsed (/harbor status to check)");
                     System.out.flush();
@@ -161,6 +167,18 @@ public final class HarborMain {
         heartbeat.setDaemon(true);
         heartbeat.start();
         return heartbeat;
+    }
+
+    /**
+     * "[Harbor] installing the dropbear packages ..." -> "installing the
+     * dropbear packages", so the heartbeat and /harbor status name the phase the
+     * console just printed instead of a phrase of their own.
+     */
+    private static String phaseOf(String progressLine) {
+        String line = progressLine.startsWith("[Harbor] ")
+                ? progressLine.substring("[Harbor] ".length())
+                : progressLine;
+        return line.endsWith(" ...") ? line.substring(0, line.length() - 4) : line;
     }
 
     private static void println(String s) {

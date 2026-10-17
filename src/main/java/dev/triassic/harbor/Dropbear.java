@@ -103,6 +103,10 @@ public final class Dropbear {
 
         // 1. Packages. dropbear-convert (NOT dropbear-openrc) provides
         //    dropbearconvert; openssh-keygen provides ssh-keygen.
+        // The log lines are the only visible progress during a first boot: this
+        // apk add pulls the package index over the network and is by far the
+        // slowest step, and execShell swallows apk's own output.
+        manager.log("dropbear: installing packages (dropbear, dropbear-convert, openssh-keygen) - slowest step");
         manager.execShell("apk add --no-cache dropbear dropbear-convert openssh-keygen");
         if (!manager.hasBinary("ssh-keygen")) {
             notes.append("ssh-keygen still missing; ");
@@ -112,6 +116,7 @@ public final class Dropbear {
         }
 
         // 2. Host keys (dropbearkey cannot write keys here: getrandom is blocked).
+        manager.log("dropbear: creating the host key");
         manager.execShell("mkdir -p /etc/ssh");
         manager.execShell("ssh-keygen -A 2>&1", 120);
         if (!manager.fileExists("/etc/ssh/ssh_host_ed25519_key")) {
@@ -121,6 +126,7 @@ public final class Dropbear {
         boolean ed25519 = manager.fileExists("/etc/ssh/ssh_host_ed25519_key");
 
         // 3. Convert OpenSSH -> dropbear format.
+        manager.log("dropbear: converting the host key to dropbear format");
         manager.execShell("mkdir -p /etc/dropbear");
         String srcKey = ed25519 ? "/etc/ssh/ssh_host_ed25519_key" : "/etc/ssh/ssh_host_rsa_key";
         String dstKey = ed25519
@@ -136,6 +142,7 @@ public final class Dropbear {
 
         // 4. authorized_keys in root's real home (dropbear reads /etc/passwd).
         String pubKey = manager.config().getString("dropbear.authorized-key", "");
+        manager.log("dropbear: installing the authorized key");
         manager.execShell("mkdir -p /root/.ssh && chmod 700 /root/.ssh");
         if (pubKey != null && !pubKey.isBlank()) {
             manager.writeFileInRootfs("/root/.ssh/authorized_keys", pubKey.trim() + "\n", "600");
@@ -225,6 +232,7 @@ public final class Dropbear {
         killExisting(port);
         // a stale pid file makes a real failure look like a clean start
         manager.execShell("rm -f " + PID_FILE);
+        manager.log("dropbear: launching on port " + port);
         String logPath = manager.detach("dropbear", "dropbear " + argsFor(port, dstKey));
 
         String listener = listener(port);

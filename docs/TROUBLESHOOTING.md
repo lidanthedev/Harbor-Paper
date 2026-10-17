@@ -51,6 +51,8 @@ plugin rootfs at `plugins/Harbor/container`.
 | 26 | Standalone | First run could block with no timeout at all (stdin, DNS) |
 | 27 | Dropbear | Dropbear up and port open, but no key to log in with |
 | 28 | Standalone | The panel's Stop button did nothing (`stop` / `end`) |
+| 29 | Dropbear | SSH worked for five minutes after boot, then refused every login |
+| 30 | Standalone | The heartbeat said "/harbor status to check", but status knew nothing |
 
 ---
 
@@ -1003,7 +1005,9 @@ and then nothing at all: no console, no progress, no way to type anything.
   one is running.
 - Internal commands now use `HarborManager.INTERNAL_TIMEOUT_SECONDS` (300 s).
   `/sh` and `startup-commands` keep their own timeouts, so the config's
-  `command-timeout-seconds: 0` still means "no limit" for those.
+  `command-timeout-seconds: 0` still means "no limit" for those. The detached
+  daemon launch is the one exception: it must not be waited for or killed at all
+  — doing exactly that to proot is what Problem 29 is about.
 - Added `Extracting minirootfs ...` and `Installing base system (alpine-base,
   apk-tools) - slowest step ...` lines: the `apk` step is where most of the time
   goes and it previously had no marker before it.
@@ -1122,16 +1126,133 @@ normal line (`echo hello`) still takes the rootfs path. Plugin mode on a
 throwaway Paper 1.20.4 still reports `Loading server plugin Harbor v1.1.2` →
 `Enabling` → `Done (4.213s)`.
 
+### Problem 29 — SSH worked for five minutes after boot, then refused every login
+
+**Symptom.** Right after a boot, SSH into the container works. About five
+minutes later every *new* connection is refused, with the port still open:
+
+```
+$ ssh -p 25584 root@host
+root@host: Permission denied (publickey,password).
+```
+
+Nothing crashed. The panel console and `/sh` keep working normally, the
+authorized key is unchanged and correct, and a manual login from the same client
+that worked minutes earlier fails. `/root/.harbor/dropbear.log` on the box:
+
+```
+[138] 13:04:46 Pubkey auth succeeded for 'root' with ssh-rsa key SHA256:60EL6...
+[146] 13:08:36 Pubkey auth succeeded for 'root' with ssh-rsa key SHA256:60EL6...
+[175] 13:09:28 Login attempt with wrong user root from 79.177.141.34:34584
+[175] 13:09:29 Exit before auth from <...>: (user 'root', 0 fails): Exited normally
+```
+
+Same dropbear process, same key, same user — and then *"wrong user"*.
+
+**Why.** dropbear logs *"Login attempt with wrong user"* only when the user
+exists but its uid does not match the server's effective uid (`src/svr-auth.c`,
+`checkusername()`):
+
+```c
+	uid = geteuid();
+	if (!(DROPBEAR_SVR_MULTIUSER && uid == 0) && uid != ses.authstate.pw_uid) {
+		dropbear_log(LOG_WARNING, "Login attempt with wrong user %s ...");
+```
+
+(an unknown user would have said *"nonexistent user"* instead). So dropbear had
+stopped seeing itself as root. It is not root: it runs inside proot, and **proot
+is the thing that fakes the root identity**. dropbear is a *tracee* of that
+proot, and the faked uid lasts exactly as long as the tracer does:
+
+```
+$ grep -E 'TracerPid|Uid' /proc/$(cat /root/.harbor/dropbear.pid)/status
+TracerPid:	0          <-- the proot that launched it is gone
+Uid:	998	998	998	998
+```
+
+**Cause: the internal 300 s timeout killed the tracer.** `detach()` launched the
+daemon through `execShell`, i.e. through `run()`, which waits for the process and
+on timeout calls `p.destroyForcibly()` — the timeout Problem 26 added so a hung
+install could not block forever. But a proot that launched a daemon **does not
+exit**: it stays alive tracing it. So the launch waited the full
+`INTERNAL_TIMEOUT_SECONDS` (300 s) and then killed proot, leaving dropbear alive,
+listening, and no longer root. The break is *300 s after the launch*, which is
+what the timestamps show:
+
+| Time (UTC) | Event |
+|---|---|
+| 13:04:09 | dropbear launched (`[136] Not backgrounding`) |
+| 13:04:46, 13:08:36 | logins succeed — proot still alive |
+| 13:09:2x | first *"wrong user root"* — 300 s after the launch |
+
+It also explains the "slow boot" of Problem 26: every boot sat silently in that
+300 s wait before moving on to `startup-commands`.
+
+**Fix.** `detach()` no longer waits for, or times out, the launch. The service's
+stdout+stderr are redirected straight into its log file by the JVM
+(`ProcessBuilder.redirectOutput(appendTo(log))`), stdin comes from `/dev/null`,
+and proot is started and left alone — it has to outlive the call, because it is
+the tracer. The 3 s pre-flight keeps its timeout: it is *expected* to end,
+because killing the pre-flight daemon leaves proot with no tracees and proot
+exits by itself.
+
+**Verified.** On the ARM panel container: after `/harbor dropbear start` the new
+listener reported `TracerPid: 376` and logins worked; 300 s later the same
+listener answered *"wrong user root"* and the pid file could not even be read
+over SSH — a clean reproduction of the five-minute window, twice. The fixed
+launcher removes the waiter, so the tracer is never killed.
+
+### Problem 30 — the heartbeat said "/harbor status to check", but status knew nothing
+
+**Symptom.** A slow startup printed
+
+```
+[Harbor] still setting up dropbear + startup commands ... 60s elapsed (/harbor status to check)
+```
+
+and `/harbor status` answered with OS, Installed, Rootfs, Dropbear, Startup cmds
+and Mode — nothing about the pass, how long it had been running, or what it was
+waiting for. The pointer was worse than useless.
+
+**Cause.** The heartbeat followed a phase, but only `HarborConsole` knew about
+the pass at all, and only as a boolean (`starting`), which `status` used for a
+single parenthetical on the `Installed:` line. The phase itself lived in an
+`AtomicReference` local to `HarborMain`'s startup thread, invisible to the
+console.
+
+**Fix.** The phase and the pass's start time now live in `HarborConsole`
+(`startupPhase()`, `startupStartedAt`); the heartbeat reads them, and
+`HarborMain`'s boot progress callback updates them from the very line it just
+printed, so the heartbeat can never disagree with the console. `status` reports
+both:
+
+```
+Installed: true
+Boot: in progress (62s) - setting up dropbear (SSH)
+```
+
+or `Boot: complete in 137s` once the pass is over. `/harbor boot` also passes a
+progress sink now, so a manual boot prints the same phase lines instead of
+sitting silent for seconds. The boot phase lines themselves got finer: the
+dropbear setup logs its slow steps (packages, host key, conversion,
+authorized key), which is the part that needs a network round trip on a fresh
+rootfs.
+
+**Verified.** `Harbor-1.1.3.jar` locally: `/harbor status` prints
+`Boot: complete in 0s`, and `stop`/`end` still exit cleanly.
+
 ---
 
 ## Verification performed
 
 | Check | Result |
 |---|---|
-| Gradle wrapper build | `BUILD SUCCESSFUL`; `Harbor-1.1.2.jar` ~383 KB (shaded) |
+| Gradle wrapper build | `BUILD SUCCESSFUL`; `Harbor-1.1.3.jar` ~384 KB (shaded) |
 | Jar contents | `plugin.yml`, `config.yml`, `Main-Class`, SnakeYAML relocated (`org/yaml/*` = 0 entries) |
-| Plugin mode (throwaway Paper 1.20.4) | `Loading`/`Enabling Harbor v1.1.2`, `Done (4.213s)`; `/harbor status` + `/sh` both dispatched |
+| Plugin mode (throwaway Paper 1.20.4) | `Loading`/`Enabling Harbor v1.1.3`, `Done (3.578s)`; `/harbor status` + `/sh` both dispatched |
 | Standalone (`java -jar`) | `plugins/Harbor/` + `config.yml` created; console → rootfs shell; clean EOF exit |
+| Standalone `stop` / `end` (Problem 28) | `stop`, `end`, `/stop`, `STOP` → two lines + exit 0 in <1 s; a normal line still takes the rootfs path |
+| `/harbor status` during a pass (Problem 30) | prints `Boot: complete in 0s` / `Boot: in progress (62s) - <phase>` |
 | Standalone config parse | real deployment `config.yml` → `port 3111`, 1 startup command, UTF-8 BOM tolerated |
 | All pinned URLs (rootfs + apk-tools, x86_64 & aarch64) | HTTP 200 |
 | `/sh echo $HOME` | `/root` (host leak fixed) |
@@ -1139,6 +1260,8 @@ throwaway Paper 1.20.4 still reports `Loading server plugin Harbor v1.1.2` →
 | `/sh` capped timeout | 2 s limit → killed, exit `-1` |
 | `/sh` 1 MB / 10 MB output | no deadlock; over-cap run capped with marker |
 | Backgrounded service survives session | verified via harness (old pattern blocked, new returns ~26 ms) |
+| Detached service launch (Problem 29) | a proot that launched a daemon stays alive tracing it, so it is no longer waited for or killed |
+| Dropbear tracer lifetime on the panel box (Problem 29) | fresh listener `TracerPid: 250/376` + logins OK; 300 s after launch `TracerPid: 0`, `Login attempt with wrong user root`, pid file unreadable over SSH |
 | `--kill-on-exit` removed | only the explanatory comment remains in the source |
 | Real deployment | rootfs installs; `apk add dropbear`; `/sh dropbear -h` OK |
 | Standalone first run, fixed jar | install from scratch in <40 s with all progress lines + live console; `/sh` → `3.22.6`, `uid=0(root)` |
@@ -1177,10 +1300,16 @@ throwaway Paper 1.20.4 still reports `Loading server plugin Harbor v1.1.2` →
   it inherits the orphan and cannot reap a process it did not spawn
   (`126 Z [dropbear]`). One pid slot each, nothing more. An idle
   `harbor-output-drain` thread also remains holding that dead child's pipe.
-- **First run is capped by the network, not by proot.** On one ARM container an
-  install + boot pass took ~137 s while a single rootfs round trip measured
-  1.3 s: the time is the minirootfs/`apk` downloads. The heartbeat names the
-  phase so a slow pass is not mistaken for a hang.
+- **First run is capped by the network, not by proot.** On one ARM container a
+  first boot still took ~1 s per rootfs round trip while the minirootfs/`apk`
+  downloads were the bulk of the time; the 300 s that used to be spent in the
+  `detach()` timeout are gone (Problem 29). The heartbeat names the phase so a
+  slow pass is not mistaken for a hang.
+- **A `startup-commands` entry that backgrounds a daemon keeps that daemon
+  alive but loses its faked root** when the command's 300 s session ends and
+  proot is torn down (Problem 29 is the same mechanism, fixed only for the
+  dropbear launch). Background long-running services through Harbor's own boot
+  (dropbear) or expect them to run as the container's real uid.
 
 ---
 

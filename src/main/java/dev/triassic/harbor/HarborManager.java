@@ -244,6 +244,11 @@ public final class HarborManager {
 
     /** Execute `shellCmd` via /bin/sh -c inside proot. Blocking; call async. */
     public ProcessResult execInRootfs(String shellCmd, long timeoutSeconds) throws Exception {
+        return run(prootCommand(shellCmd), rootfsEnv(), null, timeoutSeconds);
+    }
+
+    /** The proot binary inside the rootfs; throws when the rootfs is unusable. */
+    private File prootBinary() {
         if (!isInstalled()) {
             throw new IllegalStateException("Rootfs not installed yet. Run /harbor install first.");
         }
@@ -254,6 +259,12 @@ public final class HarborManager {
         if (!prootBin.isFile()) {
             throw new IllegalStateException("proot binary missing: " + prootBin);
         }
+        return prootBin;
+    }
+
+    /** proot argv that runs `shellCmd` inside the rootfs, i.e. `/bin/sh -c shellCmd`. */
+    private List<String> prootCommand(String shellCmd) {
+        File prootBin = prootBinary();
         List<String> cmd = new ArrayList<>();
         cmd.add(prootBin.getAbsolutePath());
         cmd.add("--rootfs=" + rootfsDir.getAbsolutePath());
@@ -300,8 +311,15 @@ public final class HarborManager {
         cmd.add("/bin/sh");
         cmd.add("-c");
         cmd.add(shellCmd);
-        // Host env leaks into proot ($HOME=/home/container, host PATH/TERM),
-        // so pin the in-rootfs values instead of inheriting them.
+        return cmd;
+    }
+
+    /**
+     * Environment for guest commands. Host env leaks into proot
+     * ($HOME=/home/container, host PATH/TERM), so pin the in-rootfs values
+     * instead of inheriting them.
+     */
+    private Map<String, String> rootfsEnv() {
         Map<String, String> env = new LinkedHashMap<>();
         env.put("HOME", "/root");
         env.put("PWD", "/root");
@@ -313,40 +331,74 @@ public final class HarborManager {
         env.put("LANG", "C.UTF-8");
         env.put("LC_ALL", "C.UTF-8");
         env.put("HOSTNAME", "harbor");
-        return run(cmd, env, null, timeoutSeconds);
+        return env;
     }
 
     /**
-     * Launch a long-running service so it survives this proot session.
+     * Launch a long-running service (dropbear) so it outlives this call.
      *
-     * Every fd must be redirected: if the backgrounded process keeps our
-     * stdout pipe open, the session never sees EOF, the launching command
-     * appears to hang and any `> log` is never flushed. Redirect stdout+stderr
-     * to a persistent file inside the rootfs (NOT /tmp, which proot re-binds
-     * per session) and stdin from /dev/null.
+     * The launch must not be waited for, and above all must not be killed on a
+     * timeout. proot here is not a wrapper that exits together with its command:
+     * it is the tracer that provides the faked root, and it lives for as long as
+     * the service does. Waiting for it therefore burned the whole
+     * INTERNAL_TIMEOUT_SECONDS on every boot and then ran destroyForcibly() on
+     * the tracer, which left dropbear alive and listening but no longer seeing
+     * uid 0 - after which every login was refused with "Login attempt with wrong
+     * user root", because checkusername() compares geteuid() with the logged-in
+     * user's uid. So: redirect the service's output into a log file inside the
+     * rootfs, start proot, and walk away without waiting.
      *
      * @return the log path inside the rootfs
      */
     public String detach(String name, String command) {
-        String log = "/root/.harbor/" + name + ".log";
-        execShell("mkdir -p /root/.harbor");
-        execShell(": > " + log); // truncate so each launch starts clean
+        String guestLog = "/root/.harbor/" + name + ".log";
+        // same file, addressed from the host side (the rootfs is a real directory)
+        File log = new File(rootfsDir, guestLog.replaceFirst("^/+", ""));
+        File dir = log.getParentFile();
+        if (dir != null) {
+            dir.mkdirs();
+        }
+        try {
+            Files.write(log.toPath(), new byte[0]); // truncate so each launch starts clean
+        } catch (Exception e) {
+            log("could not truncate " + log + ": " + e.getMessage());
+        }
 
         // Pre-flight diagnostics only: start it, give it ~3s to fail or bind,
         // then kill it. A service that cannot start (port in use, bad key)
         // exits immediately and its error is now in the log. Portables: no
         // `timeout` dependency, since busybox may not ship it.
-        execInRootfsSafe("{ " + command + " </dev/null >>" + log + " 2>&1 & "
+        //
+        // This one *is* waited for, and safely so: it is expected to end, and it
+        // always does - killing the pre-flight service leaves proot with no
+        // tracees left, so proot exits by itself within the timeout.
+        execInRootfsSafe("{ " + command + " </dev/null >>" + guestLog + " 2>&1 & "
                 + "p=$!; sleep 3; kill $p 2>/dev/null; } 2>/dev/null", 20);
 
-        // Then launch it for real, fully detached. The `sleep`/`kill` above
-        // guarantees the port is free again before this runs.
-        // </dev/null matters: without it the child inherits our stdout pipe,
-        // so the session never sees EOF and the launch looks like it hung.
-        execShell("nohup " + command + " </dev/null >>" + log + " 2>&1 & "
-                + "disown 2>/dev/null || true");
+        // Then launch it for real. No pipe to drain, no timeout, no wait: the
+        // service's proot has to stay alive exactly as long as the service does.
+        launchDetached(command, log);
         execShell("sleep 1");
-        return log;
+        return guestLog;
+    }
+
+    /** Start proot for a service and return immediately, leaving it running. */
+    private void launchDetached(String shellCmd, File log) {
+        try {
+            ProcessBuilder pb = new ProcessBuilder(prootCommand(shellCmd));
+            pb.environment().clear();
+            pb.environment().putAll(rootfsEnv());
+            pb.environment().put("PROOT_NO_SECCOMP", "1");
+            // Every fd is redirected: whoever inherits our pipes would keep them
+            // open forever and any `> log` would never be flushed.
+            pb.redirectInput(new File("/dev/null"));
+            pb.redirectErrorStream(true);
+            pb.redirectOutput(ProcessBuilder.Redirect.appendTo(log));
+            Process p = pb.start();
+            log("detached service pid " + p.pid() + ", log " + log);
+        } catch (Exception e) {
+            log("detach failed: " + e);
+        }
     }
 
     /** Like execShell but keeps the exit code (for pre-flight diagnostics). */

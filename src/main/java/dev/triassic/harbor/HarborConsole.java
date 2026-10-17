@@ -8,6 +8,7 @@ import java.util.Locale;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Standalone console loop. Every line typed into the console is executed in the
@@ -34,6 +35,10 @@ public final class HarborConsole {
     private final BlockingQueue<String> queue = new LinkedBlockingQueue<>();
     /** true until the background install + boot pass finishes. */
     private final AtomicBoolean starting = new AtomicBoolean(true);
+    /** When the background pass began, for /harbor status. */
+    private final long startupStartedAt = System.currentTimeMillis();
+    /** What the pass is doing right now, for /harbor status and the heartbeat. */
+    private final AtomicReference<String> startupPhase = new AtomicReference<>("starting up");
 
     public HarborConsole(HarborManager manager, Dropbear dropbear, HarborBoot boot) {
         this.manager = manager;
@@ -44,6 +49,16 @@ public final class HarborConsole {
     /** Called by the background startup pass once install + boot are done. */
     public void startingDone() {
         starting.set(false);
+    }
+
+    /** What the background pass is doing now ("setting up dropbear (SSH)"). */
+    public String startupPhase() {
+        return startupPhase.get();
+    }
+
+    /** Report the phase the background pass just entered. */
+    public void startupPhase(String phase) {
+        startupPhase.set(phase);
     }
 
     /** Reads stdin until EOF, then lets queued work finish and returns. */
@@ -163,6 +178,7 @@ public final class HarborConsole {
                 out("Supported: " + (manager.isLinux() && arch != null));
                 out("Installed: " + manager.isInstalled()
                         + (starting.get() && !manager.isInstalled() ? "  (install in progress)" : ""));
+                out("Boot: " + startupStatus());
                 out("Rootfs: " + manager.getRootfsDir().getAbsolutePath());
                 out("Dropbear: "
                         + (manager.config().getBoolean("dropbear.enabled", true) ? "enabled" : "disabled")
@@ -199,7 +215,7 @@ public final class HarborConsole {
                     out("rootfs not installed yet - run: /harbor install");
                     return;
                 }
-                HarborBoot.BootReport r = boot.run();
+                HarborBoot.BootReport r = boot.run(HarborConsole::out);
                 if (r.dropbearLine != null) {
                     out(r.dropbearLine);
                 }
@@ -263,6 +279,18 @@ public final class HarborConsole {
         out("/harbor boot");
         out("/harbor dropbear <start|reinstall|stop>");
         out("/harbor exec <command>");
+    }
+
+    /**
+     * "in progress (62s) - setting up dropbear (SSH)" while the background pass
+     * runs, "complete in 137s" afterwards. The startup heartbeat tells you to run
+     * /harbor status; before this, status said nothing at all about the pass.
+     */
+    private String startupStatus() {
+        long seconds = (System.currentTimeMillis() - startupStartedAt) / 1000;
+        return starting.get()
+                ? "in progress (" + seconds + "s) - " + startupPhase.get()
+                : "complete in " + seconds + "s";
     }
 
     private static void out(String s) {

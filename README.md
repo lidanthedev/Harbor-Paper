@@ -128,7 +128,7 @@ Run them again any time with `/harbor boot`.
 cd Harbor-Paper
 ./gradlew build        # Linux
 .\gradlew.bat build    # Windows
-# jar: build/libs/Harbor-1.1.2.jar   (shaded: SnakeYAML bundled + relocated)
+# jar: build/libs/Harbor-1.1.3.jar   (shaded: SnakeYAML bundled + relocated)
 ```
 
 Drop the jar in `plugins/`, restart. First enable downloads (~5MB Alpine

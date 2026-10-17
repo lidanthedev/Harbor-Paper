@@ -256,6 +256,27 @@ public final class HarborManager {
         cmd.add("--bind=/dev");
         cmd.add("--bind=/sys");
         cmd.add("--bind=/tmp");
+        // Expose the server's real working directory (the /home/container
+        // volume) inside the rootfs, so /sh can touch the actual server files
+        // directly (`ls /mnt`, `cat /mnt/server.properties`, ...). proot is not
+        // a sandbox either way (see docs/CONTAINER-LIMITS.md), so this only
+        // makes the access convenient. proot bindings are path substitutions,
+        // but we create the guest directory anyway so the mount point is a real
+        // directory in the rootfs too.
+        String realPwdGuest = plugin.getConfig().getString("real-pwd-mount", "/mnt");
+        String realPwdHost = System.getProperty("user.dir");
+        if (realPwdGuest != null && realPwdHost != null) {
+            realPwdGuest = realPwdGuest.trim();
+            while (realPwdGuest.length() > 1 && realPwdGuest.endsWith("/")) {
+                realPwdGuest = realPwdGuest.substring(0, realPwdGuest.length() - 1);
+            }
+            // "/" would shadow the whole rootfs; relative paths are not binds.
+            if (realPwdGuest.startsWith("/") && realPwdGuest.length() > 1
+                    && new File(realPwdHost).isDirectory()) {
+                new File(rootfsDir, realPwdGuest).mkdirs();
+                cmd.add("--bind=" + realPwdHost + ":" + realPwdGuest);
+            }
+        }
         cmd.add("/bin/sh");
         cmd.add("-c");
         cmd.add(shellCmd);

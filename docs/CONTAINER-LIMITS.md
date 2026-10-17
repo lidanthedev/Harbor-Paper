@@ -307,6 +307,12 @@ the outer container (capabilities + seccomp + DAC). Do not put secrets in the
 rootfs expecting isolation from the server files, and do not treat the SSH
 session as less privileged than the server itself.
 
+**Harbor feature.** Since proot is not a boundary anyway, Harbor binds the
+server's real working directory (`$PWD`, i.e. `/home/container`) into the rootfs
+at `/mnt` (`real-pwd-mount: "/mnt"`), so `/sh ls /mnt` and
+`/sh cat /mnt/server.properties` just work without any syscall trick. Set
+`real-pwd-mount: ""` to disable, or point it at another guest path.
+
 ## How to reproduce
 
 ```sh

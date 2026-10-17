@@ -22,6 +22,18 @@ proot-version: "5.3.0"
 # errors on your filesystem.
 proot-link2symlink: false
 
+# Bind the server's real working directory ($PWD, i.e. the Pterodactyl
+# /home/container volume) into the rootfs at this path, so /sh can read and
+# write the actual server files directly:
+#   /sh ls /mnt
+#   /sh cat /mnt/server.properties
+#   /sh cp /mnt/server.jar /root/backup.jar
+# The guest path does not need to exist (proot bindings are path substitutions,
+# not real mounts). Set to "" to disable. proot is not a sandbox either way, so
+# this only makes the existing access convenient -- see
+# docs/CONTAINER-LIMITS.md.
+real-pwd-mount: "/mnt"
+
 # Seconds before /sh is killed. 0 = no timeout (wait as long as it takes).
 # Output capture is capped at 8 MiB per command regardless.
 command-timeout-seconds: 0

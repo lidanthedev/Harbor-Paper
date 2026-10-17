@@ -118,14 +118,32 @@ minirootfs + apk-tools-static + proot static) and runs
 /sh cat /etc/alpine-release
 /sh apk add -q htop && htop --version
 /sh ls -la /root
+/sh ls /mnt                 # the real server directory (see below)
 /harbor status
 /harbor boot
 /harbor dropbear start
 ```
 
 Each `/sh` is one-shot: `proot --rootfs=... --root-id --cwd=/root
---bind=/proc --bind=/dev --bind=/sys --bind=/tmp /bin/sh -c "<command>"`
-with `PROOT_NO_SECCOMP=1`. proot's `--link2symlink` is **not** passed by default:
+--bind=/proc --bind=/dev --bind=/sys --bind=/tmp --bind=$PWD:/mnt
+/bin/sh -c "<command>"` with `PROOT_NO_SECCOMP=1`.
+
+The server's real working directory (`$PWD`, i.e. the `/home/container` volume)
+is bound into the rootfs at `/mnt`, so `/sh` can work with the actual server
+files directly:
+
+```
+/sh ls /mnt
+/sh cat /mnt/server.properties
+/sh cp /mnt/server.jar /root/backup.jar
+```
+
+Change the guest path with `real-pwd-mount:`, or set it to `""` to disable.
+This is a convenience, not a new capability: proot is not a sandbox, and a raw
+`openat2` reaches the same files anyway — see
+[`docs/CONTAINER-LIMITS.md`](docs/CONTAINER-LIMITS.md) §9.
+
+proot's `--link2symlink` is **not** passed by default:
 it only helps on
 filesystems that cannot create real hard links, and on a normal ext4/overlayfs
 volume it breaks `apk` installs of packages that ship hardlinked binaries
@@ -164,6 +182,7 @@ alpine-full-version: "3.22.6"
 apk-tools-version: "2.14.12-r0"
 proot-version: "5.3.0"
 proot-link2symlink: false         # only for filesystems without hard links
+real-pwd-mount: "/mnt"            # expose the server dir ($PWD) here; "" = off
 command-timeout-seconds: 0        # 0 = no timeout
 dns: ["1.1.1.1", "1.0.0.1"]
 dropbear: { enabled: true, port: 25584, authorized-key: "", allow-password-login: false }

@@ -105,12 +105,15 @@ public final class HarborPlugin extends JavaPlugin {
                 }
                 report.addAll(boot.startupLines);
                 // Silent mode hides everything above; a pass this slow must not
-                // be indistinguishable from a hang. Same wording as standalone.
+                // be indistinguishable from a hang. Paper's logger already
+                // prefixes "[Harbor] ", so the message stays bare here and
+                // renders exactly like standalone mode's "[Harbor] startup
+                // finished after Ns".
                 if (took >= HarborBoot.SLOW_STARTUP_SECONDS) {
-                    getLogger().info("[Harbor] startup finished after " + took + "s");
+                    getLogger().info("startup finished after " + took + "s");
                 }
             } catch (Exception e) {
-                getLogger().warning("[Harbor] boot tasks failed: " + e);
+                getLogger().warning("boot tasks failed: " + e);
             } finally {
                 bootRunning.set(false);
                 if (done != null) done.accept(report);

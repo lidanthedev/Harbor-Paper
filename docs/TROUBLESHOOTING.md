@@ -1420,8 +1420,11 @@ spam `silent: true` exists to avoid.
 **Fix.** Keep normal boots silent, but never keep a *slow* one silent
 (`HarborBoot.SLOW_STARTUP_SECONDS = 10`, shared with standalone mode):
 
-* a pass of 10 s or more logs `[Harbor] startup finished after 42s` — the same
-  wording standalone mode uses;
+* a pass of 10 s or more logs `startup finished after 42s`. Paper's logger
+  supplies the `[Harbor] ` prefix, so the rendered console line matches
+  standalone mode's `[Harbor] startup finished after 42s`; logging the prefixed
+  string printed `[Harbor] [Harbor] startup finished after 42s`, which is how the
+  first 1.1.5 build looked before the message was made bare;
 * when the pass was slow the `[dropbear] listening on port …` line is logged at
   `info` as well, so the summary says *what* became ready, not just how long it
   took (`silent: false` and failures behave exactly as before);
@@ -1430,19 +1433,25 @@ spam `silent: true` exists to avoid.
 * a steady-state pass (~5 s) still prints nothing.
 
 `/harbor boot` keeps its own timing, so a manual pass reports its own duration
-rather than the time since `onEnable`.
+rather than the time since `onEnable`. Standalone mode reuses the same constant
+in place of its old hardcoded 30 s, so both front-ends call a pass slow at the
+same point.
 
 **Verified.** `Harbor-1.1.5.jar`, plugin mode on the panel box (Paper 1.21.11,
-aarch64): with a temporary second `startup-commands` entry forcing a long pass,
-a restart printed
+aarch64). A temporary second `startup-commands` entry (`- "sleep 15"`) forced a
+long pass; the restart printed, `Enabling` at 15:58:00 and
 
 ```
-[15:5x:xx INFO]: [dropbear] listening on port 25571 | 256 SHA256:...
-[15:5x:xx INFO]: [Harbor] startup finished after NN s
+[15:58:21 INFO]: [Harbor] [dropbear] listening on port 25571 | 256 SHA256:fgVUb8VLu/... (ED25519)
+[15:58:21 INFO]: [Harbor] startup finished after 21s
 ```
 
-and, after the temporary entry was removed, a normal restart printed neither
-line while dropbear came up as usual.
+21 s = the ~5 s dropbear step + the 15 s command, measured from `onEnable`.
+Removing the temporary entry and restarting again printed neither line — only
+Paper's `Loading`/`Enabling Harbor v1.1.5` — while dropbear came up exactly as
+before (`[103] 15:59:33 Not backgrounding`, `PPid/TracerPid: 102`, pubkey login
+`16:00:25`). The first 1.1.5 build was replaced on the release with the
+bare-message fix and re-verified, hence the same asset name in two md5s.
 
 ---
 
@@ -1458,6 +1467,10 @@ line while dropbear came up as usual.
 | `/harbor status` during a pass (Problem 30) | prints `Boot: complete in 0s` / `Boot: in progress (62s) - <phase>` |
 | `/harbor status` after a pass (Problem 31) | live 1.1.4: `Boot: complete in 5s` for a 5.2 s pass, still `5s` 2.5 min later (old code kept counting up); locally `complete in 0s` on three calls 3 s apart |
 | `panel-done-line` (Problem 32) | live 1.1.4: boot ends with `Done (5s)! For help, type "help"` for a 5.2 s pass and the panel state moves `starting` → `running` with no faked startup command |
+| Slow silent boot (Problem 33) | live 1.1.5, plugin mode, forced 21 s pass (temporary `- "sleep 15"` startup command): `[Harbor] [dropbear] listening on port 25571 \| …` + `[Harbor] startup finished after 21s`; the same restart without the temporary command printed neither line and dropbear logged in as usual |
+| Slow-pass line render (Problem 33) | first 1.1.5 build printed `[Harbor] [Harbor] startup finished after 21s` (Paper already prefixes `[Harbor] `); message made bare, release asset replaced, re-verified as `[Harbor] startup finished after 21s` |
+| Standalone 1.1.5 smoke (shared threshold) | local `java -jar`: `[Harbor] 1.1.5 standalone mode`, `Done (0s)!`, `/harbor status` → `Boot: in progress (0s) - running 1 startup command(s)`, `end` → clean stop; a 0 s pass still prints no summary line |
+| Plugin-mode restart, unattended dropbear (Problem 33) | live 1.1.4: panel restart → `Enabling` 15:50:02, dropbear log `15:50:07 Not backgrounding` (pid 103, `PPid`/`TracerPid` 102), pubkey login 15:50:35 — no manual reinstall needed |
 | Standalone config parse | real deployment `config.yml` → `port 3111`, 1 startup command, UTF-8 BOM tolerated |
 | All pinned URLs (rootfs + apk-tools, x86_64 & aarch64) | HTTP 200 |
 | `/sh echo $HOME` | `/root` (host leak fixed) |
@@ -1502,6 +1515,11 @@ line while dropbear came up as usual.
   exits cleanly — see Problem 28. To leave `starting`, set
   `panel-done-line: 'Done (%ds)! For help, type "help"'` and Harbor prints it
   itself, with the real boot time, when the pass ends (Problem 32).
+- **A silent pass over 10 s always prints two lines** (`[dropbear] listening …`
+  and `[Harbor] startup finished after Ns`) on every restart, by design
+  (Problem 33). That is the price of a slow boot never looking hung: there is no
+  setting that gives both silence and a visible slow pass. Steady-state passes
+  (~5 s) print neither line, and `silent: false` still shows everything.
 - **Standalone mode leaves one zombie per `detach()`.** The 3-second pre-flight
   (Problem 17) starts a daemon and kills it; the JVM is PID 1 in a container, so
   it inherits the orphan and cannot reap a process it did not spawn

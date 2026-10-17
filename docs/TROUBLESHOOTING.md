@@ -595,6 +595,15 @@ if (!sender.hasPermission("harbor.shell")) {
 
 Ops get it by default. `/harbor …` is gated on `harbor.admin`.
 
+**What `harbor.shell` actually grants.** Not a sandbox. The rootfs shares the
+container's namespaces, the server directory is bound at `/mnt`
+(`real-pwd-mount`), and proot's path translation can be bypassed with a raw
+`openat2` syscall — see `docs/CONTAINER-LIMITS.md` §9. The permission is
+effectively **root-equivalent read/write over everything the server user owns**
+(`server.jar`, `server.properties`, `eula.txt`, plugins, worlds) plus the ability
+to signal PID 1 (the server). Treat it as host shell access, not as a chat
+command.
+
 ---
 
 ## Operating the daemon

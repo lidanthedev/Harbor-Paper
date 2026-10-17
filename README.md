@@ -9,13 +9,29 @@ The same jar also runs **standalone**: launched directly (`java -jar`, e.g. as
 `server.jar`) it needs no Paper at all — the console becomes a shell into the
 same rootfs. See [Run as server.jar](#run-as-serverjar-standalone).
 
+> ## ⚠️ `harbor.shell` is root-equivalent on the server
+>
+> `/sh` is **full read/write access to the server's filesystem — it is not a
+> sandbox.** The rootfs shares the container's namespaces, the server directory is
+> bound at `/mnt` (`real-pwd-mount`), and proot's path translation can be bypassed
+> outright with a raw `openat2` syscall. So `harbor.shell` can read and modify
+> anything the server user owns — `server.jar`, `server.properties`, `eula.txt`,
+> plugins, worlds, other people's configs — and can signal PID 1 (the server).
+>
+> Grant it exactly like you would shell access on the host. **Never** give it to
+> anyone you would not make an operator with filesystem access.
+>
+> Details, including the working escape proof:
+> [`docs/CONTAINER-LIMITS.md`](docs/CONTAINER-LIMITS.md).
+
 ## What you get
 
 - Silent: no banner, no GoTTY, no blocking. Install runs async on enable.
   Routine logs go to `fine` when `silent: true` (default).
 - Normal commands:
   - `/sh <command>` — runs `/bin/sh -c "<command>"` inside Alpine via proot.
-    Output is sent back to the sender only, chunked. Perm `harbor.shell` (op).
+    Output is sent back to the sender only, chunked. Perm `harbor.shell` (op) —
+    see the warning above: this is root-equivalent on the server filesystem.
   - `/harbor status|install|reinstall|boot|dropbear|exec` — admin. Perm `harbor.admin` (op).
 - Whole rootfs in plugin folder:
   - `plugins/Harbor/container/` (+ `.installed` marker, `usr/local/bin/proot`, `etc/resolv.conf`)

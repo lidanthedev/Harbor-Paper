@@ -1216,6 +1216,16 @@ Also observed on 1.1.2: the panel console queues behind that same wait, so a
 command sent right after `/harbor dropbear start` sat unexecuted for five
 minutes and then ran.
 
+**Confirmed on 1.1.3.** With the fixed launcher deployed and the server
+restarted, the same box gave the opposite result: the listener launched at
+14:56:09 and at 15:02:29 — **380 s later**, past the exact point where 1.1.2
+died twice — still reported `PPid: 72` / `TracerPid: 72`, and a fresh login
+succeeded (`uid=0(root) gid=0(root) groups=998`). A `/sh` sent through the panel
+console ran in **6 s** instead of queueing ~300 s, i.e. the boot pass is no
+longer parked in that wait. The launch argv shows the change directly: it is now
+`proot … /bin/sh -c dropbear -F -E …` with no `nohup … &` wrapper, and proot
+appears as the daemon's parent *and* tracer.
+
 ### Problem 30 — the heartbeat said "/harbor status to check", but status knew nothing
 
 **Symptom.** A slow startup printed

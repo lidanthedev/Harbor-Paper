@@ -15,7 +15,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * "/harbor ..." is reserved for Harbor itself (status, install, reinstall, boot,
  * dropbear, exec, help). "/sh ..." is accepted as an alias for the shell so
- * muscle memory from plugin mode still works. Nothing else is intercepted.
+ * muscle memory from plugin mode still works. "stop" and "end" (with or without
+ * a leading slash) shut the process down, because that is what a hosting panel
+ * types into stdin to stop a Minecraft or Velocity server. Nothing else is
+ * intercepted.
  *
  * Lines are read on the calling thread and executed one at a time on a worker
  * thread, so a long-running (or hung) command can never block the console.
@@ -86,15 +89,44 @@ public final class HarborConsole {
             manage(line.length() > 8 ? line.substring(8).trim() : "");
             return;
         }
+        // Minecraft-compatible shutdown. A hosting panel stops a server by typing
+        // its stop command into stdin - "stop" on the Minecraft eggs, "end" on
+        // the Velocity one - and treats "the process exited" as a clean stop.
+        // Without this, pressing Stop did nothing until the panel gave up and
+        // killed the container. Left un-intercepted, these lines went to the
+        // rootfs shell ("stop: not found").
+        if (isStopCommand(line)) {
+            shutdown(line);
+            return;
+        }
         String shellCmd = line.equals("/sh") ? ""
                 : line.startsWith("/sh ") ? line.substring(4).trim()
                 : line;
         if (shellCmd.isEmpty()) {
             out("usage: <command>            run it in the rootfs");
+            out("       stop | end           shut Harbor down");
             out("       /harbor <subcommand> manage Harbor");
             return;
         }
         shell(shellCmd);
+    }
+
+    /** "stop", "end", "/stop", "/end" - any case, surrounding space already trimmed. */
+    private static boolean isStopCommand(String line) {
+        String bare = line.startsWith("/") ? line.substring(1) : line;
+        return bare.equalsIgnoreCase("stop") || bare.equalsIgnoreCase("end");
+    }
+
+    /**
+     * Exit so the panel's Stop completes normally instead of timing out into a
+     * kill. The registered shutdown hook stops the dropbear listener Harbor
+     * started; anything else running in the rootfs ends with the container.
+     */
+    private void shutdown(String typed) {
+        out("[Harbor] " + typed.trim().toLowerCase(Locale.ROOT) + " -> stopping"
+                + (starting.get() ? " (startup pass still running; cut short)" : ""));
+        out("[Harbor] dropbear and rootfs services end with the container");
+        System.exit(0);
     }
 
     private void shell(String shellCmd) {
@@ -225,6 +257,7 @@ public final class HarborConsole {
 
     private void usage() {
         out("console: type a command to run it in the rootfs (no /sh needed)");
+        out("stop | end  -> shut Harbor down (what a hosting panel sends)");
         out("/harbor status");
         out("/harbor install | reinstall");
         out("/harbor boot");

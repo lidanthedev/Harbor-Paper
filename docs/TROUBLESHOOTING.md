@@ -50,6 +50,7 @@ plugin rootfs at `plugins/Harbor/container`.
 | 25 | Daemon | One Harbor's dropbear restart killed another Harbor's |
 | 26 | Standalone | First run could block with no timeout at all (stdin, DNS) |
 | 27 | Dropbear | Dropbear up and port open, but no key to log in with |
+| 28 | Standalone | The panel's Stop button did nothing (`stop` / `end`) |
 
 ---
 
@@ -958,8 +959,8 @@ thread, so a hung command cannot block the console.
 installed was noisy — it tried to set up dropbear in a nonexistent rootfs. It now
 reports `rootfs not installed yet` and returns.
 
-**Verified.** Throwaway Paper 1.20.4: `Loading server plugin Harbor v1.1.0` →
-`Enabling Harbor v1.1.0` → `Done (4.127s)`, with `/harbor status` and
+**Verified.** Throwaway Paper 1.20.4: `Loading server plugin Harbor v1.1.2` →
+`Enabling Harbor v1.1.2` → `Done (4.213s)`, with `/harbor status` and
 `/sh echo hi` both dispatched. Standalone `java -jar` in a scratch directory:
 `plugins/Harbor/` created, `config.yml` written, `/harbor status` and the shell
 path reachable, clean exit on stdin EOF, and the real deployment's `config.yml`
@@ -1046,7 +1047,7 @@ daemon thread draining output, and `execShell` using
 - A heartbeat prints every 30 s while a first install runs
   (`[Harbor] still installing the rootfs ... 30s elapsed`), so a frozen line now
   means a dead process and names the step it stopped at.
-- The banner reports the build (`[Harbor] 1.1.1 standalone mode, data folder
+- The banner reports the build (`[Harbor] 1.1.2 standalone mode, data folder
   ...`). The jar that hung was also called 1.1.0, so "am I running the fixed
   build?" previously had no answer from the console.
 
@@ -1087,15 +1088,49 @@ exercised — that install finished before the first 30 s tick. Also confirmed
 with the same build: a second Harbor instance running alongside the plugin no
 longer kills the plugin's listener (Problem 25).
 
+### Problem 28 — the panel's Stop button did nothing
+
+**Symptom.** In standalone mode, pressing Stop in the panel left the process
+running until the panel gave up and killed the container. Typing `stop` in the
+console printed nothing useful.
+
+**Cause.** Every console line that is not `/harbor ...` is run in the rootfs —
+that is the point of standalone mode — so `stop` became `sh -c stop` →
+`stop: not found`. A hosting panel stops a server by writing the egg's stop
+command to the process's stdin and treating "the process exited" as a clean
+stop: the Minecraft eggs send `stop`, the Velocity egg sends `end`. Neither was
+handled.
+
+**Fix.** The standalone console intercepts `stop` and `end` (any case, with or
+without a leading slash) and exits:
+
+```
+[Harbor] stop -> stopping
+[Harbor] dropbear and rootfs services end with the container
+```
+
+`System.exit(0)` runs the registered shutdown hook, which stops the dropbear
+listener Harbor started; everything else in the rootfs ends with the container.
+The panel therefore sees an ordinary clean stop instead of escalating to a kill.
+
+Deliberately **not** wired into plugin mode: there Paper owns the console and its
+own `stop`, and Harbor never sees those lines.
+
+**Verified.** Each form piped into `java -jar Harbor-1.1.2.jar` — `stop`, `end`,
+`/stop`, `STOP` — printed the two lines, exited 0, and took under a second. A
+normal line (`echo hello`) still takes the rootfs path. Plugin mode on a
+throwaway Paper 1.20.4 still reports `Loading server plugin Harbor v1.1.2` →
+`Enabling` → `Done (4.213s)`.
+
 ---
 
 ## Verification performed
 
 | Check | Result |
 |---|---|
-| Gradle wrapper build | `BUILD SUCCESSFUL`; `Harbor-1.1.1.jar` ~381 KB (shaded) |
+| Gradle wrapper build | `BUILD SUCCESSFUL`; `Harbor-1.1.2.jar` ~383 KB (shaded) |
 | Jar contents | `plugin.yml`, `config.yml`, `Main-Class`, SnakeYAML relocated (`org/yaml/*` = 0 entries) |
-| Plugin mode (throwaway Paper 1.20.4) | `Loading`/`Enabling Harbor v1.1.0`, `Done (4.127s)`; `/harbor status` + `/sh` both dispatched |
+| Plugin mode (throwaway Paper 1.20.4) | `Loading`/`Enabling Harbor v1.1.2`, `Done (4.213s)`; `/harbor status` + `/sh` both dispatched |
 | Standalone (`java -jar`) | `plugins/Harbor/` + `config.yml` created; console → rootfs shell; clean EOF exit |
 | Standalone config parse | real deployment `config.yml` → `port 3111`, 1 startup command, UTF-8 BOM tolerated |
 | All pinned URLs (rootfs + apk-tools, x86_64 & aarch64) | HTTP 200 |
@@ -1134,8 +1169,9 @@ longer kills the plugin's listener (Problem 25).
   the server is up when the egg's startup line appears, and the standard
   Minecraft eggs look for `Done (x.xxs)! For help, type "help"`. A standalone
   Harbor never prints that, so the panel stays in `starting` even though the
-  console is fully usable. Cosmetic, but it also means the panel's stop button
-  types `stop` into Harbor's console, where it is just a rootfs shell command.
+  console is fully usable. Cosmetic, and stopping is handled properly: the panel
+  sends `stop` (or `end` on the Velocity egg) and Harbor exits cleanly —
+  see Problem 28.
 - **Standalone mode leaves one zombie per `detach()`.** The 3-second pre-flight
   (Problem 17) starts a daemon and kills it; the JVM is PID 1 in a container, so
   it inherits the orphan and cannot reap a process it did not spawn

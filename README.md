@@ -128,7 +128,7 @@ Run them again any time with `/harbor boot`.
 cd Harbor-Paper
 ./gradlew build        # Linux
 .\gradlew.bat build    # Windows
-# jar: build/libs/Harbor-1.1.1.jar   (shaded: SnakeYAML bundled + relocated)
+# jar: build/libs/Harbor-1.1.2.jar   (shaded: SnakeYAML bundled + relocated)
 ```
 
 Drop the jar in `plugins/`, restart. First enable downloads (~5MB Alpine
@@ -227,6 +227,11 @@ java -jar server.jar
   `boot`, `dropbear <start|reinstall|stop>`, `exec <command>`, `help`.
   `/sh <command>` is accepted as an alias for the shell, so muscle memory from
   plugin mode still works.
+- **`stop` and `end` shut Harbor down** (any case, with or without a leading
+  slash). Hosting panels stop a server by typing its stop command into stdin —
+  `stop` on the Minecraft eggs, `end` on the Velocity one — so the panel's Stop
+  button now completes normally instead of waiting and then killing the
+  container. Every other line is still a rootfs command.
 - dropbear is set up exactly as in plugin mode (same code path), so SSH works
   identically. The dropbear line is always printed at boot so you can see the
   port and fingerprint.

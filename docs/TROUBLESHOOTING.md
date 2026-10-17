@@ -48,6 +48,7 @@ plugin rootfs at `plugins/Harbor/container`.
 | 23 | Standalone | One jar had to work with no Bukkit on the classpath |
 | 24 | Standalone | First run looked hung: no console, no progress |
 | 25 | Daemon | One Harbor's dropbear restart killed another Harbor's |
+| 26 | Standalone | First run could block with no timeout at all (stdin, DNS) |
 
 ---
 
@@ -939,13 +940,72 @@ and then nothing at all: no console, no progress, no way to type anything.
   apk-tools) - slowest step ...` lines: the `apk` step is where most of the time
   goes and it previously had no marker before it.
 
+### Problem 26 — a first run could block with no timeout at all
+
+**Symptom.** A standalone deployment sat on the same first-run line
+
+```
+[Harbor] first run: installing the Alpine rootfs (this takes a minute)...
+```
+
+for a whole day. Problem 24 explains why that line appeared with no console and
+no progress; it does not explain a process that never finishes.
+
+**Cause.** Two waits in the install path had no timeout of any kind, so "slow"
+and "wedged" were indistinguishable:
+
+1. **Child stdin.** `ProcessBuilder` gives every child a stdin pipe that Harbor
+   never writes to and never closes. A child that reads stdin therefore blocks
+   forever: no data, and because the write end is still held open, no EOF
+   either.
+2. **DNS.** Java has no bounded name lookup. `setConnectTimeout` covers the TCP
+   connect only — the hostname is resolved inside `getResponseCode()`, and every
+   redirect hop resolves another host (the proot download redirects from GitHub
+   to its object store). A resolver that accepts the query and never answers
+   hangs the calling thread indefinitely, and the socket timeouts never fire
+   because no socket exists yet.
+
+Everything else was already bounded: process timeouts, `destroyForcibly`, a
+daemon thread draining output, and `execShell` using
+`INTERNAL_TIMEOUT_SECONDS`.
+
+**Fix.**
+
+- The child's stdin is closed right after `start()`, so a child that reads stdin
+  gets EOF instead of hanging.
+- The download is bounded as a whole rather than per socket: `fetch()` does the
+  transfer and `download()` joins it with a 300 s limit. Bounding the whole
+  transfer is what covers redirect hops, which a pre-flight lookup would miss.
+- A heartbeat prints every 30 s while a first install runs
+  (`[Harbor] still installing ... 300s elapsed`), so a frozen line now means a
+  dead process and names the step it stopped at.
+- The banner reports the build (`[Harbor] 1.1.1 standalone mode, data folder
+  ...`). The jar that hung was also called 1.1.0, so "am I running the fixed
+  build?" previously had no answer from the console.
+
+**Note.** A first run that is already stuck never recovers on its own —
+whatever it is blocked on has no timeout, by definition. Stop the server and
+start it again with the new jar. If it still stops, the last line names the
+step; `silent: false` in `plugins/Harbor/config.yml` shows every internal
+command as well.
+
+**Verified (real Linux container, fixed jar).** First run from scratch with
+`silent: true` and dropbear disabled: all five progress lines printed,
+`/harbor status` answered *during* the install (reporting `Installed: false
+(install in progress)`), install finished in under 40 s, then
+`/sh cat /etc/alpine-release` → `3.22.6` and `/sh id` → `uid=0(root)
+gid=0(root) groups=987` from the fresh rootfs. The heartbeat itself was not
+exercised — that install finished before the first 30 s tick. Also confirmed
+with the same build: a second Harbor instance running alongside the plugin no
+longer kills the plugin's listener (Problem 25).
+
 ---
 
 ## Verification performed
 
 | Check | Result |
 |---|---|
-| Gradle wrapper build | `BUILD SUCCESSFUL`; `Harbor-1.1.0.jar` ~379 KB (shaded) |
+| Gradle wrapper build | `BUILD SUCCESSFUL`; `Harbor-1.1.1.jar` ~381 KB (shaded) |
 | Jar contents | `plugin.yml`, `config.yml`, `Main-Class`, SnakeYAML relocated (`org/yaml/*` = 0 entries) |
 | Plugin mode (throwaway Paper 1.20.4) | `Loading`/`Enabling Harbor v1.1.0`, `Done (4.127s)`; `/harbor status` + `/sh` both dispatched |
 | Standalone (`java -jar`) | `plugins/Harbor/` + `config.yml` created; console → rootfs shell; clean EOF exit |
@@ -958,6 +1018,8 @@ and then nothing at all: no console, no progress, no way to type anything.
 | Backgrounded service survives session | verified via harness (old pattern blocked, new returns ~26 ms) |
 | `--kill-on-exit` removed | only the explanatory comment remains in the source |
 | Real deployment | rootfs installs; `apk add dropbear`; `/sh dropbear -h` OK |
+| Standalone first run, fixed jar | install from scratch in <40 s with all progress lines + live console; `/sh` → `3.22.6`, `uid=0(root)` |
+| Second Harbor beside the plugin | boot + `/harbor dropbear start` leave the plugin's key listener (port 3111) alive (Problem 25) |
 
 ---
 

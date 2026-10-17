@@ -39,6 +39,11 @@ public final class HarborMain {
         HarborConfig config = new YamlConfig(configFile);
         boolean silent = config.getBoolean("silent", true);
 
+        // Say which build this is. A stuck first run is impossible to diagnose
+        // if you cannot tell which jar produced it.
+        System.out.println("[Harbor] " + version() + " standalone mode, data folder " + dataDir);
+        System.out.flush();
+
         Logger logger = Logger.getLogger("Harbor");
         logger.setUseParentHandlers(false);
         // Log to stdout, not stderr (ConsoleHandler's default). The standalone
@@ -110,6 +115,13 @@ public final class HarborMain {
         startup.start();
 
         console.run();
+    }
+
+    /** Build version from the jar manifest ("dev" when run from classes). */
+    private static String version() {
+        Package pkg = HarborMain.class.getPackage();
+        String v = pkg == null ? null : pkg.getImplementationVersion();
+        return v == null ? "dev" : v;
     }
 
     /**

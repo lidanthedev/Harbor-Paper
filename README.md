@@ -138,6 +138,14 @@ when proot exits, which would make backgrounded daemons (dropbear) impossible to
 keep alive. See [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) for the full
 story, including why this looked like an empty log file.
 
+What the container actually lets you do (capabilities, cgroup limits, mounts,
+network egress, namespaces, devices) was measured on a live deployment and is
+written up in [`docs/CONTAINER-LIMITS.md`](docs/CONTAINER-LIMITS.md). Short
+version: proot is a compatibility layer, **not** a sandbox — the rootfs shares
+the server's namespaces and the session can see and signal PID 1. The real
+limits come from the outer container: no capabilities, a seccomp filter, a
+read-only image root, high ports only, no `/dev/net/tun`, and IPv4-only egress.
+
 `command-timeout-seconds: 0` (default) means **no timeout** — `/sh` waits as long
 as the command takes. Set it to a positive number to cap runs; on expiry the
 process is force-killed and the partial output plus `[timed out after Ns]` is

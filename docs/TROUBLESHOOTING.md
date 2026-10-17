@@ -49,6 +49,7 @@ plugin rootfs at `plugins/Harbor/container`.
 | 24 | Standalone | First run looked hung: no console, no progress |
 | 25 | Daemon | One Harbor's dropbear restart killed another Harbor's |
 | 26 | Standalone | First run could block with no timeout at all (stdin, DNS) |
+| 27 | Dropbear | Dropbear up and port open, but no key to log in with |
 
 ---
 
@@ -561,6 +562,24 @@ execInRootfsSafe("{ " + command + " </dev/null >>" + log + " 2>&1 & "
 `/harbor dropbear start` reports the log **inline** on failure, so the operator sees the
 actual reason (e.g. `Address in use`) without a second command.
 
+**Consequence to expect — two launches per boot.** Because the pre-flight really
+does run the daemon, the log shows a start/kill pair immediately before the real
+launch, and the pid changes:
+
+```
+[126] Oct 17 12:41:34 Not backgrounding
+[126] Oct 17 12:41:37 Early exit: Terminated by signal   <- pre-flight, killed by us
+[131] Oct 17 12:41:37 Not backgrounding                  <- real launch
+```
+
+This looks like a restart loop and is not one. It also leaves a **zombie**: in
+standalone mode the JVM is PID 1 in the container, so the killed pre-flight
+process is reparented to it, and a JVM that is not a real init never reaps it
+(`126 Z [dropbear]` in `ps`). It is one zombie per `detach()`, it holds no
+memory beyond a pid slot, and it cannot be avoided without a `waitpid` the JVM
+cannot make for a process it did not spawn — so it is documented rather than
+fixed. Plugin mode has the same pair but no zombie, because Paper is not PID 1.
+
 ### Problem 18 — Port not reachable from outside even when bound
 
 **Symptom.** The deployment used port `3111` (not the default `25584`).
@@ -842,6 +861,54 @@ or set `dropbear.authorized-key` and run `/harbor dropbear reinstall`.
 whether the file is already good. Overwriting on every boot turns a one-off
 mistake into a recurring lockout.
 
+### Problem 27 — dropbear up, port open, and still nothing can log in
+
+**Symptom.** Dropbear is plainly listening (the port answers, the log shows
+`Child connection from <ip>`), but every SSH client ends with
+`Exit before auth` / `Permission denied (publickey)`. The console's
+`[dropbear]` line looks healthy apart from a trailing note.
+
+**Cause.** Not a bug in the daemon: there is no key to authenticate with.
+`reinstall()` only writes `/root/.ssh/authorized_keys` from
+`dropbear.authorized-key` (Problem 22), and the default config ships that field
+**empty**:
+
+```yaml
+dropbear:
+  authorized-key: ""
+```
+
+With the field empty and nothing to migrate, nothing is installed, and because
+`allow-password-login: false` the daemon runs with `-g` (keys only). So there is
+no credential that could possibly work, and the only sign is the note at the end
+of the dropbear line:
+
+```
+no authorized_keys yet (add dropbear.authorized-key to config);
+```
+
+**Fix.** Put your public key in the config, then reload the keys:
+
+```yaml
+dropbear:
+  authorized-key: "ssh-ed25519 AAAA...you@host"
+```
+
+```
+/harbor dropbear reinstall
+```
+
+Or, without editing the config, append it from the console:
+
+```
+/sh mkdir -p /root/.ssh && chmod 700 /root/.ssh && printf '%s\n' 'ssh-ed25519 AAAA...you@host' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys
+```
+
+**Lesson.** "The daemon is running" and "you can log in" are different claims.
+The healthy-looking dropbear line is exactly why this one is easy to misread as
+an authentication bug — read the note at the end of it, and check the file:
+`/sh wc -l /root/.ssh/authorized_keys`.
+
 ---
 
 ## Standalone mode (`server.jar`)
@@ -977,11 +1044,32 @@ daemon thread draining output, and `execShell` using
   transfer and `download()` joins it with a 300 s limit. Bounding the whole
   transfer is what covers redirect hops, which a pre-flight lookup would miss.
 - A heartbeat prints every 30 s while a first install runs
-  (`[Harbor] still installing ... 300s elapsed`), so a frozen line now means a
-  dead process and names the step it stopped at.
+  (`[Harbor] still installing the rootfs ... 30s elapsed`), so a frozen line now
+  means a dead process and names the step it stopped at.
 - The banner reports the build (`[Harbor] 1.1.1 standalone mode, data folder
   ...`). The jar that hung was also called 1.1.0, so "am I running the fixed
   build?" previously had no answer from the console.
+
+**Follow-up — one heartbeat covering two phases was its own confusion.** On an
+ARM Pterodactyl container the console printed `still installing ... 120s elapsed`
+while `/harbor status` already said `Installed: true` and dropbear was listening.
+Nothing was wrong: the heartbeat spanned the whole startup pass, and the dropbear
+setup that runs *after* the install was still announcing itself as an install.
+The heartbeat now names the phase and changes when the phase does, boot prints
+each phase, and a slow pass says how long it took:
+
+```
+[Harbor] still installing the rootfs ... 30s elapsed
+[Harbor] setting up dropbear (SSH) ...
+[Harbor] still setting up dropbear + startup commands ... 60s elapsed
+[dropbear] listening on port 25584 | 256 SHA256:... (ED25519)
+[Harbor] running 1 startup command(s) ...
+[Harbor] startup finished after 137s
+```
+
+Measured on that container, one rootfs round trip (a full proot launch) is ~1.3 s,
+so a slow pass is download and package time, not proot overhead — which is why
+per-phase lines, and not fewer round trips, are the right fix here.
 
 **Note.** A first run that is already stuck never recovers on its own —
 whatever it is blocked on has no timeout, by definition. Stop the server and
@@ -1042,6 +1130,21 @@ longer kills the plugin's listener (Problem 25).
 - **Stale configs.** New config keys are not injected into an existing
   `plugins/Harbor/config.yml`; code defaults keep things working, but append the
   keys or delete the file to see them.
+- **The panel keeps showing "starting" in standalone mode.** Pterodactyl decides
+  the server is up when the egg's startup line appears, and the standard
+  Minecraft eggs look for `Done (x.xxs)! For help, type "help"`. A standalone
+  Harbor never prints that, so the panel stays in `starting` even though the
+  console is fully usable. Cosmetic, but it also means the panel's stop button
+  types `stop` into Harbor's console, where it is just a rootfs shell command.
+- **Standalone mode leaves one zombie per `detach()`.** The 3-second pre-flight
+  (Problem 17) starts a daemon and kills it; the JVM is PID 1 in a container, so
+  it inherits the orphan and cannot reap a process it did not spawn
+  (`126 Z [dropbear]`). One pid slot each, nothing more. An idle
+  `harbor-output-drain` thread also remains holding that dead child's pipe.
+- **First run is capped by the network, not by proot.** On one ARM container an
+  install + boot pass took ~137 s while a single rootfs round trip measured
+  1.3 s: the time is the minirootfs/`apk` downloads. The heartbeat names the
+  phase so a slow pass is not mistaken for a hang.
 
 ---
 

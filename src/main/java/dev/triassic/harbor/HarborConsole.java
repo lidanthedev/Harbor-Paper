@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Locale;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Standalone console loop. Every line typed into the console is executed in the
@@ -28,11 +29,18 @@ public final class HarborConsole {
     private final Dropbear dropbear;
     private final HarborBoot boot;
     private final BlockingQueue<String> queue = new LinkedBlockingQueue<>();
+    /** true until the background install + boot pass finishes. */
+    private final AtomicBoolean starting = new AtomicBoolean(true);
 
     public HarborConsole(HarborManager manager, Dropbear dropbear, HarborBoot boot) {
         this.manager = manager;
         this.dropbear = dropbear;
         this.boot = boot;
+    }
+
+    /** Called by the background startup pass once install + boot are done. */
+    public void startingDone() {
+        starting.set(false);
     }
 
     /** Reads stdin until EOF, then lets queued work finish and returns. */
@@ -91,7 +99,9 @@ public final class HarborConsole {
 
     private void shell(String shellCmd) {
         if (!manager.isInstalled()) {
-            out("rootfs not installed yet - run: /harbor install");
+            out(starting.get()
+                    ? "still installing the rootfs - progress is printed above; /harbor status to check"
+                    : "rootfs not installed yet - run: /harbor install");
             return;
         }
         long timeout = manager.config().getLong("command-timeout-seconds", 0);
@@ -119,7 +129,8 @@ public final class HarborConsole {
                 out("--- Harbor ---");
                 out("OS: " + System.getProperty("os.name") + " / " + System.getProperty("os.arch"));
                 out("Supported: " + (manager.isLinux() && arch != null));
-                out("Installed: " + manager.isInstalled());
+                out("Installed: " + manager.isInstalled()
+                        + (starting.get() && !manager.isInstalled() ? "  (install in progress)" : ""));
                 out("Rootfs: " + manager.getRootfsDir().getAbsolutePath());
                 out("Dropbear: "
                         + (manager.config().getBoolean("dropbear.enabled", true) ? "enabled" : "disabled")
@@ -129,6 +140,10 @@ public final class HarborConsole {
                 return;
             }
             case "install": {
+                if (starting.get() && !manager.isInstalled()) {
+                    out("install already in progress - progress is printed above");
+                    return;
+                }
                 if (manager.isInstalled()) {
                     out("already installed: " + manager.getRootfsDir().getAbsolutePath());
                     return;
@@ -138,6 +153,10 @@ public final class HarborConsole {
                 return;
             }
             case "reinstall": {
+                if (starting.get()) {
+                    out("install/boot still in progress - wait for it to finish first");
+                    return;
+                }
                 out("wiping " + manager.getRootfsDir().getAbsolutePath() + " and reinstalling...");
                 delete(manager.getRootfsDir());
                 out(manager.ensureInstalled() ? "reinstall complete" : "reinstall FAILED (see log above)");

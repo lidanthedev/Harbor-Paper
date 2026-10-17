@@ -230,8 +230,12 @@ java -jar server.jar
 - dropbear is set up exactly as in plugin mode (same code path), so SSH works
   identically. The dropbear line is always printed at boot so you can see the
   port and fingerprint.
-- `silent: true` still keeps Harbor's own fine-level chatter off; the `$ command`
-  echo and the command output always show, since the console is the interface.
+- The console is usable immediately. A first-run install runs in the background
+  and prints its progress (`Downloading Alpine minirootfs …`, `Installing base
+  system …`); commands typed while it runs tell you it is still working.
+- `silent: true` keeps Harbor's routine chatter off *after* boot; the `$ command`
+  echo, the command output, and install/boot progress always show, since the
+  console is the interface.
 
 Useful when you want a Linux box on a Minecraft host without running Minecraft
 at all — or to bootstrap the rootfs before ever starting Paper.

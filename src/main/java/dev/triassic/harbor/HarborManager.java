@@ -155,6 +155,7 @@ public final class HarborManager {
                 download("https://dl-cdn.alpinelinux.org/alpine/v" + alpineVersion
                         + "/releases/" + arch
                         + "/alpine-minirootfs-" + alpineFull + "-" + arch + ".tar.gz", rootfsTar);
+                log("Extracting minirootfs ...");
                 runOrThrow(Arrays.asList("tar", "-xzf", rootfsTar.getAbsolutePath(),
                         "-C", rootfsDir.getAbsolutePath()), null, 300);
 
@@ -188,6 +189,7 @@ public final class HarborManager {
                 // which restricted containers (Pterodactyl) deny with
                 // "Operation not permitted". The payload installs fine
                 // without them; openrc runlevels are meaningless under proot.
+                log("Installing base system (alpine-base, apk-tools) - slowest step ...");
                 ProcessResult apkResult = run(Arrays.asList(
                         apkStatic.getAbsolutePath(),
                         "-X", "https://dl-cdn.alpinelinux.org/alpine/v" + alpineVersion + "/main/",
@@ -363,9 +365,18 @@ public final class HarborManager {
         return config;
     }
 
-    /** Convenience: run a command in the rootfs with no timeout; swallow errors. */
+    /**
+     * Timeout for Harbor's *own* commands (package installs, keygen, file
+     * writes, the dropbear launch). `/sh` and `startup-commands` have their own
+     * timeouts; this exists only so Harbor cannot block forever if proot or the
+     * network stalls. Before this, the `apk add dropbear …` during boot used an
+     * unlimited timeout and could hang the standalone console indefinitely.
+     */
+    public static final long INTERNAL_TIMEOUT_SECONDS = 300;
+
+    /** Convenience: run an internal command in the rootfs; swallow errors. */
     public String execShell(String shellCmd) {
-        return execShell(shellCmd, 0);
+        return execShell(shellCmd, INTERNAL_TIMEOUT_SECONDS);
     }
 
     /** @param timeoutSeconds 0 or less = no timeout. */

@@ -46,6 +46,7 @@ plugin rootfs at `plugins/Harbor/container`.
 | 21 | Install | `apk` cannot install packages that contain hard links |
 | 22 | Access | `dropbear reinstall` could silently lock you out |
 | 23 | Standalone | One jar had to work with no Bukkit on the classpath |
+| 24 | Standalone | First run looked hung: no console, no progress |
 
 ---
 
@@ -854,6 +855,47 @@ reports `rootfs not installed yet` and returns.
 path reachable, clean exit on stdin EOF, and the real deployment's `config.yml`
 parsed correctly (nested `dropbear:` block → `port 3111`, `startup-commands`
 list, UTF-8 BOM tolerated).
+
+### Problem 24 — standalone looked hung on first run
+
+**Symptom.** Running the jar standalone printed
+
+```
+[Harbor] first run: installing the Alpine rootfs (this takes a minute)...
+```
+
+and then nothing at all: no console, no progress, no way to type anything.
+
+**Cause.** Three separate things, all in the standalone front-end:
+
+1. `HarborMain` called `ensureInstalled()` **on the main thread, before
+   `HarborConsole.run()`**. An install takes minutes, so the console was not
+   even reading stdin yet — the program genuinely was unresponsive.
+2. `HarborManager.log()` writes at `fine` when `silent: true` (the default), and
+   `HarborMain` set the logger level to `INFO`. Every install progress line was
+   therefore discarded: a multi-minute download with zero output looks dead.
+3. `HarborManager.execShell(String)` defaulted to `timeoutSeconds = 0`, i.e.
+   *no timeout*. `Dropbear` uses that overload for `apk add --no-cache dropbear
+   dropbear-convert openssh-keygen` during boot, so a stalled network could
+   block startup forever.
+
+**Fix.**
+
+- Install + boot now run on a background `harbor-startup` thread; the console
+  starts immediately and stays usable throughout.
+- While that first pass runs the logger is raised to `ALL`, so install progress
+  is visible; it drops back to `silent ? INFO : ALL` when the pass finishes.
+- Commands that need the rootfs while it is still installing say so
+  (`still installing the rootfs - progress is printed above`), and `/harbor
+  status` reports `Installed: false  (install in progress)`.
+- `/harbor install` and `/harbor reinstall` refuse to start a second pass while
+  one is running.
+- Internal commands now use `HarborManager.INTERNAL_TIMEOUT_SECONDS` (300 s).
+  `/sh` and `startup-commands` keep their own timeouts, so the config's
+  `command-timeout-seconds: 0` still means "no limit" for those.
+- Added `Extracting minirootfs ...` and `Installing base system (alpine-base,
+  apk-tools) - slowest step ...` lines: the `apk` step is where most of the time
+  goes and it previously had no marker before it.
 
 ---
 

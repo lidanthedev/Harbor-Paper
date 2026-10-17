@@ -62,26 +62,47 @@ public final class HarborMain {
             }
         }, "harbor-shutdown"));
 
-        if (!manager.isInstalled()) {
-            System.out.println("[Harbor] first run: installing the Alpine rootfs (this takes a minute)...");
-            System.out.flush();
-            manager.ensureInstalled();
-        }
-        if (manager.isInstalled()) {
-            HarborBoot.BootReport report = boot.run();
-            // The dropbear line is the SSH entry point: always show it.
-            if (report.dropbearLine != null) {
-                System.out.println(report.dropbearLine);
-            }
-            if (!silent) {
-                for (String line : report.startupLines) {
-                    System.out.println(line);
-                }
-            }
-            System.out.flush();
-        }
+        HarborConsole console = new HarborConsole(manager, dropbear, boot);
 
-        new HarborConsole(manager, dropbear, boot).run();
+        // Install + boot run in the background so the console accepts input
+        // immediately. Doing this inline made the whole program look hung for
+        // the minutes a first-run install takes.
+        Thread startup = new Thread(() -> {
+            boolean firstRun = !manager.isInstalled();
+            if (firstRun) {
+                System.out.println("[Harbor] first run: installing the Alpine rootfs "
+                        + "(a few minutes; progress below) ...");
+                System.out.flush();
+                // Harbor logs install progress at fine level, which silent:true
+                // hides. A silent multi-minute download looks dead, so surface
+                // everything until boot is done.
+                logger.setLevel(Level.ALL);
+            }
+            try {
+                if (firstRun && !manager.ensureInstalled()) {
+                    System.out.println("[Harbor] install FAILED - see above; retry with /harbor install");
+                    System.out.flush();
+                }
+                if (manager.isInstalled()) {
+                    HarborBoot.BootReport report = boot.run();
+                    // The dropbear line is the SSH entry point: always show it.
+                    if (report.dropbearLine != null) {
+                        System.out.println(report.dropbearLine);
+                        System.out.flush();
+                    }
+                }
+            } catch (Throwable t) {
+                System.out.println("[Harbor] startup failed: " + t);
+                System.out.flush();
+            } finally {
+                logger.setLevel(silent ? Level.INFO : Level.ALL);
+                console.startingDone();
+            }
+        }, "harbor-startup");
+        startup.setDaemon(true);
+        startup.start();
+
+        console.run();
     }
 
     private static void writeResource(String resource, File dest) throws Exception {

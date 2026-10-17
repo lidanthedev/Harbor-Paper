@@ -47,6 +47,7 @@ plugin rootfs at `plugins/Harbor/container`.
 | 22 | Access | `dropbear reinstall` could silently lock you out |
 | 23 | Standalone | One jar had to work with no Bukkit on the classpath |
 | 24 | Standalone | First run looked hung: no console, no progress |
+| 25 | Daemon | One Harbor's dropbear restart killed another Harbor's |
 
 ---
 
@@ -571,6 +572,47 @@ successfully-bound but unallocated port is unreachable from outside.
 this server, and confirm the allocation in the panel. `dropbear.enabled`,
 `dropbear.port`, `dropbear.authorized-key` and `dropbear.allow-password-login` are
 all configurable under the `dropbear:` block.
+
+---
+
+### Problem 25 — one Harbor's dropbear restart killed another Harbor's
+
+**Symptom.** Testing standalone mode alongside the running plugin killed the
+plugin's dropbear. The SSH session was cut with `Connection closed by remote
+host`, and reconnecting gave `banner exchange: Connection to UNKNOWN port -1:
+Connection refused`. The standalone instance was listening on a *different* port
+and had no business touching it.
+
+**Cause.** `Dropbear.killExisting()` ended with
+
+```sh
+pkill -x dropbear 2>/dev/null
+```
+
+to "catch strays". A name-based kill is only safe if exactly one dropbear exists
+in the PID namespace. This container has **no PID namespace isolation** — every
+namespace is identical to PID 1 (see `docs/CONTAINER-LIMITS.md`) — so
+`pkill -x dropbear` kills *every* dropbear in the container: one belonging to
+another Harbor instance, and the per-connection child carrying your own session.
+
+**Fix.** Kill only our own listener, using the pid file dropbear writes with
+`-P`, verified against `/proc/<pid>/comm` so a stale file pointing at a recycled
+pid can never take out an unrelated process:
+
+```sh
+p=$(cat /root/.harbor/dropbear.pid 2>/dev/null)
+if [ -n "$p" ] && [ "$(cat /proc/$p/comm 2>/dev/null)" = dropbear ]; then
+  kill "$p" 2>/dev/null; sleep 1; [ -d /proc/$p ] && kill -9 "$p" 2>/dev/null
+fi
+```
+
+The liveness check was made instance-scoped for the same reason: `pidof dropbear`
+reports `alive` when *any* dropbear runs, which masks a failed start.
+
+**Note.** A stray dropbear we cannot identify is deliberately left running. It
+holds the port, the pre-flight launch fails to bind, and the failure is reported
+with its log — which is the correct outcome, and strictly better than killing
+somebody else's SSH.
 
 ---
 

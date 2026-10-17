@@ -3,11 +3,11 @@ package dev.triassic.harbor;
 import java.io.File;
 import java.io.InputStream;
 import java.nio.file.Files;
-import java.util.logging.ConsoleHandler;
 import java.util.logging.Formatter;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
 import java.util.logging.Logger;
+import java.util.logging.StreamHandler;
 
 /**
  * Standalone entry point: run the jar directly (e.g. renamed to server.jar) and
@@ -41,7 +41,10 @@ public final class HarborMain {
 
         Logger logger = Logger.getLogger("Harbor");
         logger.setUseParentHandlers(false);
-        ConsoleHandler handler = new ConsoleHandler();
+        // Log to stdout, not stderr (ConsoleHandler's default). The standalone
+        // console is a single stream, and splitting progress onto stderr makes
+        // it interleave with command output out of order.
+        StreamHandler handler = new StdoutHandler();
         handler.setFormatter(new PlainFormatter());
         handler.setLevel(Level.ALL);
         logger.addHandler(handler);
@@ -115,6 +118,24 @@ public final class HarborMain {
                 parent.mkdirs();
             }
             Files.copy(in, dest.toPath());
+        }
+    }
+
+    /** ConsoleHandler writes to stderr; the standalone console wants stdout. */
+    private static final class StdoutHandler extends StreamHandler {
+        StdoutHandler() {
+            super(System.out, new PlainFormatter());
+        }
+
+        @Override
+        public void publish(LogRecord record) {
+            super.publish(record);
+            flush();
+        }
+
+        @Override
+        public void close() {
+            flush();
         }
     }
 

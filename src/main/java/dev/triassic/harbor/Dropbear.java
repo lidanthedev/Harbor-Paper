@@ -186,18 +186,30 @@ public final class Dropbear {
     }
 
     /**
-     * Kill the running listener and its per-connection children.
+     * Kill our own running listener, identified by the pid file dropbear wrote
+     * with -P.
      *
-     * The pid file is precise; `pkill -x dropbear` (exact process name) catches
-     * strays. Deliberately NOT `pkill -f 'dropbear .*-p <port>'`: that regex also
-     * matches this very command line, the proot launcher (whose argv contains
-     * the whole `nohup dropbear ... -p <port>` string), and any other shell that
-     * happens to quote it - i.e. it shoots the caller.
+     * Deliberately NOT `pkill -x dropbear`: this container shares the host's PID
+     * namespace, so a name-based kill also takes out a dropbear belonging to a
+     * *different* Harbor (a standalone instance next to the plugin, or vice
+     * versa) - including the one carrying your SSH session. Observed exactly
+     * that while testing standalone mode: its dropbear setup killed the
+     * plugin's dropbear on another port and dropped the live session.
+     *
+     * `pkill -f 'dropbear .*-p <port>'` is equally unusable: that regex matches
+     * this command line and the proot launcher's argv, i.e. it shoots the
+     * caller. The pid file is the only precise handle available.
+     *
+     * The pid is verified against /proc/<pid>/comm before killing, so a stale
+     * file pointing at a recycled pid can never take out an unrelated process.
+     * A stray we cannot identify is left alone: it holds the port, the
+     * pre-flight launch fails to bind, and the failure is reported with its log.
      */
     private void killExisting(int port) {
-        manager.execShell("[ -f " + PID_FILE + " ] && kill \"$(cat " + PID_FILE + ")\" 2>/dev/null; "
-                + "sleep 1; "
-                + "pkill -x dropbear 2>/dev/null; "
+        manager.execShell("p=$(cat " + PID_FILE + " 2>/dev/null); "
+                + "if [ -n \"$p\" ] && [ \"$(cat /proc/$p/comm 2>/dev/null)\" = dropbear ]; then "
+                + "kill \"$p\" 2>/dev/null; sleep 1; [ -d /proc/$p ] && kill -9 \"$p\" 2>/dev/null; "
+                + "fi; "
                 + "rm -f " + PID_FILE);
         manager.execShell("sleep 1");
     }
@@ -217,8 +229,11 @@ public final class Dropbear {
 
         String listener = listener(port);
         boolean listening = !listener.trim().isEmpty();
+        // Our own pid, not `pidof dropbear`: another Harbor's dropbear must not
+        // make a failed start look alive.
         boolean alive = !manager.execShell(
-                "pidof dropbear 2>/dev/null || pgrep -x dropbear 2>/dev/null").trim().isEmpty();
+                "p=$(cat " + PID_FILE + " 2>/dev/null); "
+                        + "[ -n \"$p\" ] && [ -d /proc/$p ] && echo yes").trim().isEmpty();
         String log = manager.execShell("cat " + logPath + " 2>/dev/null");
         String fingerprint = manager.execShell(
                 "ssh-keygen -lf " + sshKeyFor(dstKey) + " 2>/dev/null").trim();

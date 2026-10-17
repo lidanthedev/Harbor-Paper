@@ -78,7 +78,11 @@ public final class HarborPlugin extends JavaPlugin {
             List<String> report = new ArrayList<>();
             try {
                 if (dropbear.isEnabled()) {
-                    Dropbear.Result r = dropbear.setup();
+                    // Boot: cheap restart when it is already set up, full setup otherwise.
+                    Dropbear.Result r = dropbear.start();
+                    if (!r.ok && r.needsSetup) {
+                        r = dropbear.reinstall();
+                    }
                     String line = "[dropbear] " + (r.ok ? "listening" : "FAILED")
                             + " on port " + r.port
                             + (r.fingerprint.isEmpty() ? "" : " | " + r.fingerprint)

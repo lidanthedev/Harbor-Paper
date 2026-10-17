@@ -14,8 +14,19 @@ import java.util.List;
  *     -> apk add dropbear dropbear-convert, then dropbearconvert.
  *   * dropbear resolves the user home from /etc/passwd, not $HOME
  *     -> authorized_keys must live in /root/.ssh, not /home/container.
+ *
+ * Three operations, deliberately kept separate:
+ *   start()     - kill + relaunch using what is already installed (fast, no
+ *                 package or key work). This is what "restart" means.
+ *   reinstall() - packages + host keys + conversion + authorized_keys, then start.
+ *   stop()      - kill the listener and any per-connection children.
+ *
+ * Note that stop()/start() necessarily drop any *active* SSH sessions: the
+ * process being killed is the one serving them.
  */
 public final class Dropbear {
+
+    private static final String PID_FILE = "/root/.harbor/dropbear.pid";
 
     private final HarborManager manager;
 
@@ -23,18 +34,25 @@ public final class Dropbear {
         this.manager = manager;
     }
 
-    /** Result of a setup run, for reporting back to the operator. */
+    /** Result of an operation, for reporting back to the operator. */
     public static final class Result {
         public final boolean ok;
         public final int port;
         public final String fingerprint;
         public final String notes;
+        /** true when the rootfs is not set up for dropbear yet (call reinstall()). */
+        public final boolean needsSetup;
 
-        Result(boolean ok, int port, String fingerprint, String notes) {
+        Result(boolean ok, int port, String fingerprint, String notes, boolean needsSetup) {
             this.ok = ok;
             this.port = port;
             this.fingerprint = fingerprint;
             this.notes = notes;
+            this.needsSetup = needsSetup;
+        }
+
+        Result(boolean ok, int port, String fingerprint, String notes) {
+            this(ok, port, fingerprint, notes, false);
         }
     }
 
@@ -46,8 +64,40 @@ public final class Dropbear {
         return manager.config().getInt("dropbear.port", 25584);
     }
 
-    /** Blocking; call async. Idempotent enough to be safe on every boot. */
-    public Result setup() {
+    // ---- operations --------------------------------------------------------
+
+    /**
+     * Restart dropbear using what is already installed: kill the running one and
+     * launch it again with the existing host key. No package install, no key
+     * generation - so it is fast and safe to run any time.
+     *
+     * If the rootfs has never been set up, returns {@code needsSetup} so the
+     * caller can fall back to {@link #reinstall()}.
+     */
+    public Result start() {
+        int port = port();
+        String key = currentHostKey();
+        if (key == null || !manager.hasBinary("dropbear")) {
+            return new Result(false, port, "", "not set up yet (run /harbor dropbear reinstall)", true);
+        }
+        return launchAndReport(port, key, new StringBuilder());
+    }
+
+    /** Stop the listener and any per-connection children. */
+    public Result stop() {
+        int port = port();
+        killExisting(port);
+        boolean listening = !listener(port).trim().isEmpty();
+        return new Result(!listening, port, "",
+                listening ? "still listening on " + port : "stopped");
+    }
+
+    /**
+     * Full setup: packages, host keys, conversion, authorized_keys, then start.
+     * Idempotent - every step is skipped when it is already done. This is the
+     * "reinstall" path, not a plain restart.
+     */
+    public Result reinstall() {
         int port = port();
         StringBuilder notes = new StringBuilder();
 
@@ -99,41 +149,8 @@ public final class Dropbear {
             notes.append("no authorized_keys yet (add dropbear.authorized-key to config); ");
         }
 
-        // 5. Start it detached. -F is REQUIRED here: without it dropbear tries to
-        //    daemonise and misbehaves inside this container. -F keeps it in the
-        //    foreground, so we detach it ourselves (see HarborManager#detach:
-        //    stdin from /dev/null, stdout+stderr to a persistent log inside the
-        //    rootfs, otherwise the launch hangs and no log is ever written).
-        //    -E = log to stderr, -K 60 = keepalive.
-        boolean allowPw = manager.config().getBoolean("dropbear.allow-password-login", false);
-        manager.execShell("pkill -f 'dropbear .*-p " + port + "' 2>/dev/null");
-        String args = "-F -E -K 60 -p " + port + " -r " + dstKey
-                + " -P /root/.harbor/dropbear.pid";
-        if (!allowPw) {
-            args += " -g"; // no root password logins; keys only
-        }
-        // a stale pid file makes a real failure look like a clean start
-        manager.execShell("rm -f /root/.harbor/dropbear.pid");
-        String logPath = manager.detach("dropbear", "dropbear " + args);
-
-        // 6. Report. Verify the socket, the process, and the log.
-        String listener = manager.execShell("ss -tlnp 2>/dev/null | grep ':" + port + "' "
-                + "|| netstat -tln 2>/dev/null | grep ':" + port + "'");
-        boolean listening = !listener.trim().isEmpty();
-        boolean alive = !manager.execShell(
-                "pidof dropbear 2>/dev/null || pgrep -f 'dropbear .*-F' 2>/dev/null").trim().isEmpty();
-        String log = manager.execShell("cat " + logPath + " 2>/dev/null");
-        String fingerprint = manager.execShell(
-                "ssh-keygen -lf " + srcKey + " 2>/dev/null").trim();
-        if (!listening) {
-            notes.append("not listening on ").append(port)
-                    .append(", log ").append(logPath).append(": ")
-                    .append(log.isBlank() ? "(empty)" : HarborManager.truncate(log, 400)).append("; ");
-        }
-        if (!alive) {
-            notes.append("process not running; ");
-        }
-        return new Result(listening, port, fingerprint, notes.toString().trim());
+        // 5+6. (Re)start and report.
+        return launchAndReport(port, dstKey, notes);
     }
 
     /** Host key fingerprint without restarting anything. */
@@ -151,5 +168,87 @@ public final class Dropbear {
             }
         }
         return "(no host key)";
+    }
+
+    // ---- internals ---------------------------------------------------------
+
+    /** dropbear-format host key that already exists, or null. */
+    private String currentHostKey() {
+        for (String c : new String[]{"/etc/dropbear/dropbear_ed25519_host_key",
+                "/etc/dropbear/dropbear_rsa_host_key"}) {
+            if (manager.fileExists(c)) {
+                return c;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Kill the running listener and its per-connection children.
+     *
+     * The pid file is precise; `pkill -x dropbear` (exact process name) catches
+     * strays. Deliberately NOT `pkill -f 'dropbear .*-p <port>'`: that regex also
+     * matches this very command line, the proot launcher (whose argv contains
+     * the whole `nohup dropbear ... -p <port>` string), and any other shell that
+     * happens to quote it - i.e. it shoots the caller.
+     */
+    private void killExisting(int port) {
+        manager.execShell("[ -f " + PID_FILE + " ] && kill \"$(cat " + PID_FILE + ")\" 2>/dev/null; "
+                + "sleep 1; "
+                + "pkill -x dropbear 2>/dev/null; "
+                + "rm -f " + PID_FILE);
+        manager.execShell("sleep 1");
+    }
+
+    /** Launch dropbear detached, then verify the socket, the process and the log. */
+    private Result launchAndReport(int port, String dstKey, StringBuilder notes) {
+        // -F is REQUIRED here: without it dropbear tries to daemonise and
+        // misbehaves inside this container. -F keeps it in the foreground and
+        // HarborManager#detach does the detaching (stdin from /dev/null,
+        // stdout+stderr to a persistent log inside the rootfs, otherwise the
+        // launch hangs and no log is ever written). -E = log to stderr,
+        // -K 60 = keepalive.
+        killExisting(port);
+        // a stale pid file makes a real failure look like a clean start
+        manager.execShell("rm -f " + PID_FILE);
+        String logPath = manager.detach("dropbear", "dropbear " + argsFor(port, dstKey));
+
+        String listener = listener(port);
+        boolean listening = !listener.trim().isEmpty();
+        boolean alive = !manager.execShell(
+                "pidof dropbear 2>/dev/null || pgrep -x dropbear 2>/dev/null").trim().isEmpty();
+        String log = manager.execShell("cat " + logPath + " 2>/dev/null");
+        String fingerprint = manager.execShell(
+                "ssh-keygen -lf " + sshKeyFor(dstKey) + " 2>/dev/null").trim();
+        if (!listening) {
+            notes.append("not listening on ").append(port)
+                    .append(", log ").append(logPath).append(": ")
+                    .append(log.isBlank() ? "(empty)" : HarborManager.truncate(log, 400)).append("; ");
+        }
+        if (!alive) {
+            notes.append("process not running; ");
+        }
+        return new Result(listening, port, fingerprint, notes.toString().trim());
+    }
+
+    private String argsFor(int port, String dstKey) {
+        boolean allowPw = manager.config().getBoolean("dropbear.allow-password-login", false);
+        String args = "-F -E -K 60 -p " + port + " -r " + dstKey + " -P " + PID_FILE;
+        if (!allowPw) {
+            args += " -g"; // no root password logins; keys only
+        }
+        return args;
+    }
+
+    private String listener(int port) {
+        return manager.execShell("ss -tlnp 2>/dev/null | grep ':" + port + "' "
+                + "|| netstat -tln 2>/dev/null | grep ':" + port + "'");
+    }
+
+    /** The OpenSSH key a dropbear-format key was converted from (for the fingerprint). */
+    private static String sshKeyFor(String dropbearKey) {
+        return dropbearKey.contains("ed25519")
+                ? "/etc/ssh/ssh_host_ed25519_key"
+                : "/etc/ssh/ssh_host_rsa_key";
     }
 }

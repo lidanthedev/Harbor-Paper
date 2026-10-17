@@ -42,7 +42,7 @@ public final class HarborCommand implements TabExecutor {
                 sender.sendMessage("§7Startup cmds: §f"
                         + plugin.getConfig().getStringList("startup-commands").size());
                 sender.sendMessage("§7Use: §f/sh <command> §7e.g. §f/sh cat /etc/alpine-release");
-                sender.sendMessage("§7Boot tasks: §f/harbor boot §7| dropbear: §f/harbor dropbear");
+                sender.sendMessage("§7Boot tasks: §f/harbor boot §7| dropbear: §f/harbor dropbear <start|reinstall|stop>");
                 return true;
             }
             case "install": {
@@ -90,36 +90,58 @@ public final class HarborCommand implements TabExecutor {
                 return true;
             }
             case "dropbear": {
-                boolean enable = args.length < 2 || !args[1].equalsIgnoreCase("off");
-                if (args.length >= 2 && args[1].equalsIgnoreCase("off")) {
-                    plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
-                        plugin.manager().execShell("pkill -f dropbear 2>/dev/null");
-                        plugin.getServer().getScheduler().runTask(plugin, () ->
-                                sender.sendMessage("§aStopped dropbear."));
-                    });
+                if (args.length < 2) {
+                    sender.sendMessage("§eUsage: /" + label + " dropbear <start|reinstall|stop>");
+                    sender.sendMessage("§7start §8= restart with the existing host key (fast)");
+                    sender.sendMessage("§7reinstall §8= packages + host keys + authorized_keys, then start");
+                    sender.sendMessage("§7stop §8= kill dropbear");
+                    return true;
+                }
+                String action = args[1].toLowerCase(Locale.ROOT);
+                if (!action.equals("start") && !action.equals("reinstall") && !action.equals("stop")) {
+                    sender.sendMessage("§eUsage: /" + label + " dropbear <start|reinstall|stop>");
                     return true;
                 }
                 if (!plugin.manager().isInstalled()) {
                     sender.sendMessage("§cRootfs not installed yet.");
                     return true;
                 }
-                sender.sendMessage("§eSetting up dropbear (host key via ssh-keygen + dropbearconvert)...");
+                if (action.equals("stop")) {
+                    sender.sendMessage("§eStopping dropbear...");
+                    plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+                        Dropbear.Result r = plugin.dropbear().stop();
+                        plugin.getServer().getScheduler().runTask(plugin, () ->
+                                sender.sendMessage(r.ok
+                                        ? "§aStopped dropbear."
+                                        : "§cCould not stop dropbear: " + r.notes));
+                    });
+                    return true;
+                }
+                boolean reinstall = action.equals("reinstall");
+                sender.sendMessage(reinstall
+                        ? "§eReinstalling dropbear (packages, host keys, authorized_keys)..."
+                        : "§eRestarting dropbear (existing host key)...");
                 plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
-                    Dropbear.Result r = plugin.dropbear().setup();
+                    Dropbear d = plugin.dropbear();
+                    Dropbear.Result r = reinstall ? d.reinstall() : d.start();
+                    // a plain start on a rootfs that was never set up becomes a setup
+                    if (!reinstall && !r.ok && r.needsSetup) {
+                        r = d.reinstall();
+                    }
+                    final Dropbear.Result result = r;
                     plugin.getServer().getScheduler().runTask(plugin, () -> {
-                        sender.sendMessage(r.ok
-                                ? "§aDropbear listening on port " + r.port
-                                : "§cDropbear setup failed.");
-                        if (!r.fingerprint.isEmpty()) {
-                            sender.sendMessage("§7Host key: " + r.fingerprint);
+                        sender.sendMessage(result.ok
+                                ? "§aDropbear listening on port " + result.port
+                                : "§cDropbear " + (reinstall ? "reinstall" : "start") + " failed.");
+                        if (!result.fingerprint.isEmpty()) {
+                            sender.sendMessage("§7Host key: " + result.fingerprint);
                         }
-                        if (!r.notes.isEmpty()) {
-                            sender.sendMessage("§eNotes: " + r.notes);
+                        if (!result.notes.isEmpty()) {
+                            sender.sendMessage("§eNotes: " + result.notes);
                         }
-                        sender.sendMessage("§7Connect: ssh -p " + r.port
-                                + " root@<panel-host> -D 127.0.0.1:1080 -N");
-                        if (!enable) {
-                            sender.sendMessage("§7(ignored: 'off' handled separately)");
+                        if (result.ok) {
+                            sender.sendMessage("§7Connect: ssh -p " + result.port
+                                    + " root@<panel-host> -D 127.0.0.1:1080 -N");
                         }
                     });
                 });
@@ -137,7 +159,7 @@ public final class HarborCommand implements TabExecutor {
             return Arrays.asList("status", "install", "reinstall", "boot", "dropbear", "exec");
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("dropbear")) {
-            return Arrays.asList("on", "off");
+            return Arrays.asList("start", "reinstall", "stop");
         }
         return Collections.emptyList();
     }

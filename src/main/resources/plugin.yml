@@ -1,5 +1,5 @@
 name: Harbor
-version: '1.0.0'
+version: '1.1.0'
 main: dev.triassic.harbor.HarborPlugin
 api-version: '1.13'
 description: Run Alpine Linux minirootfs inside plugins/Harbor with root privileges. Paper port of RealTriassic/Harbor.

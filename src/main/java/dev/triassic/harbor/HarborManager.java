@@ -14,6 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Logger;
 
 /**
  * Ports harbor.sh install + proot exec logic to run with
@@ -26,15 +27,23 @@ public final class HarborManager {
     /** Hard cap on captured output so unlimited runs cannot exhaust memory. */
     private static final int MAX_CAPTURE_BYTES = 8 * 1024 * 1024;
 
-    private final HarborPlugin plugin;
+    private final HarborConfig config;
+    private final Logger logger;
     private final File rootfsDir;
     private final File tmpDir;
     private final Object installLock = new Object();
 
-    public HarborManager(HarborPlugin plugin) {
-        this.plugin = plugin;
-        this.rootfsDir = new File(plugin.getDataFolder(), "container");
-        this.tmpDir = new File(System.getProperty("java.io.tmpdir"), "harbor-" + plugin.getDataFolder().getName());
+    /**
+     * @param dataFolder plugins/Harbor - the rootfs lives in <dataFolder>/container
+     * @param config     plugin mode: Bukkit's FileConfiguration; standalone: the
+     *                   parsed plugins/Harbor/config.yml
+     * @param logger     Paper's plugin logger, or a console logger standalone
+     */
+    public HarborManager(File dataFolder, HarborConfig config, Logger logger) {
+        this.config = config;
+        this.logger = logger;
+        this.rootfsDir = new File(dataFolder, "container");
+        this.tmpDir = new File(System.getProperty("java.io.tmpdir"), "harbor-" + dataFolder.getName());
     }
 
     public File getRootfsDir() {
@@ -77,11 +86,20 @@ public final class HarborManager {
         return new File(rootfsDir, ".installed").exists();
     }
 
+    /** config silent:true keeps Harbor's own chatter at fine level. */
+    public boolean isSilent() {
+        return config.getBoolean("silent", true);
+    }
+
+    public Logger logger() {
+        return logger;
+    }
+
     public void log(String msg) {
-        if (plugin.isSilent()) {
-            plugin.getLogger().fine("[Harbor] " + msg);
+        if (isSilent()) {
+            logger.fine("[Harbor] " + msg);
         } else {
-            plugin.getLogger().info(msg);
+            logger.info(msg);
         }
     }
 
@@ -92,22 +110,22 @@ public final class HarborManager {
                 return true;
             }
             if (!isLinux()) {
-                plugin.getLogger().warning("[Harbor] proot requires Linux. Refusing install on "
+                logger.warning("[Harbor] proot requires Linux. Refusing install on "
                         + System.getProperty("os.name"));
                 return false;
             }
             String[] archPair = detectArch();
             if (archPair == null) {
-                plugin.getLogger().warning("[Harbor] Unsupported CPU architecture: "
+                logger.warning("[Harbor] Unsupported CPU architecture: "
                         + System.getProperty("os.arch"));
                 return false;
             }
             String arch = archPair[0];
 
-            String alpineVersion = plugin.getConfig().getString("alpine-version", "3.22");
-            String alpineFull = plugin.getConfig().getString("alpine-full-version", "3.22.6");
-            String apkToolsVersion = plugin.getConfig().getString("apk-tools-version", "2.14.12-r0");
-            String prootVersion = plugin.getConfig().getString("proot-version", "5.3.0");
+            String alpineVersion = config.getString("alpine-version", "3.22");
+            String alpineFull = config.getString("alpine-full-version", "3.22.6");
+            String apkToolsVersion = config.getString("apk-tools-version", "2.14.12-r0");
+            String prootVersion = config.getString("proot-version", "5.3.0");
             // Upstream 3.18 pins 404 (apk-tools-static pruned from dl-cdn).
             // Auto-migrate stale configs from plugin v1.0.0 so existing
             // servers don't need to hand-edit config.yml.
@@ -117,18 +135,18 @@ public final class HarborManager {
                 apkToolsVersion = "2.14.12-r0";
                 log("Migrating stale Alpine 3.18 pins to 3.22.6 / apk-tools-static 2.14.12-r0");
             }
-            List<String> dns = plugin.getConfig().getStringList("dns");
+            List<String> dns = config.getStringList("dns");
             if (dns.isEmpty()) {
                 dns = Arrays.asList("1.1.1.1", "1.0.0.1");
             }
 
             try {
                 if (!rootfsDir.mkdirs() && !rootfsDir.isDirectory()) {
-                    plugin.getLogger().warning("[Harbor] Cannot create " + rootfsDir);
+                    logger.warning("[Harbor] Cannot create " + rootfsDir);
                     return false;
                 }
                 if (!tmpDir.mkdirs() && !tmpDir.isDirectory()) {
-                    plugin.getLogger().warning("[Harbor] Cannot create tmp " + tmpDir);
+                    logger.warning("[Harbor] Cannot create tmp " + tmpDir);
                     return false;
                 }
 
@@ -211,11 +229,11 @@ public final class HarborManager {
                 log("Install complete: " + rootfsDir.getAbsolutePath());
                 return true;
             } catch (Exception e) {
-                plugin.getLogger().warning("[Harbor] Install failed: " + e.getMessage());
-                if (!plugin.isSilent()) {
+                logger.warning("[Harbor] Install failed: " + e.getMessage());
+                if (!isSilent()) {
                     e.printStackTrace();
                 } else {
-                    plugin.getLogger().fine("Install failure: " + e);
+                    logger.fine("Install failure: " + e);
                 }
                 return false;
             }
@@ -243,7 +261,7 @@ public final class HarborManager {
         // packages containing hardlinks (gcc/g++/binutils fail to install with
         // "Operation not permitted") and litters the rootfs with un-removable
         // .l2s.* chains, so it is opt-in.
-        if (plugin.getConfig().getBoolean("proot-link2symlink", false)) {
+        if (config.getBoolean("proot-link2symlink", false)) {
             cmd.add("--link2symlink");
         }
         // Deliberately NOT passing --kill-on-exit: its entire job is to kill
@@ -263,7 +281,7 @@ public final class HarborManager {
         // makes the access convenient. proot bindings are path substitutions,
         // but we create the guest directory anyway so the mount point is a real
         // directory in the rootfs too.
-        String realPwdGuest = plugin.getConfig().getString("real-pwd-mount", "/mnt");
+        String realPwdGuest = config.getString("real-pwd-mount", "/mnt");
         String realPwdHost = System.getProperty("user.dir");
         if (realPwdGuest != null && realPwdHost != null) {
             realPwdGuest = realPwdGuest.trim();
@@ -341,8 +359,8 @@ public final class HarborManager {
 
     // ---- helpers used by Dropbear / startup commands ----
 
-    public org.bukkit.configuration.file.FileConfiguration config() {
-        return plugin.getConfig();
+    public HarborConfig config() {
+        return config;
     }
 
     /** Convenience: run a command in the rootfs with no timeout; swallow errors. */

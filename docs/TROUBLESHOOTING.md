@@ -43,6 +43,9 @@ plugin rootfs at `plugins/Harbor/container`.
 | 18 | Dropbear | Port not reachable from outside even when bound |
 | 19 | Access | `/sh` had no permission gate |
 | 20 | Daemon | The restart command killed the session it was typed into |
+| 21 | Install | `apk` cannot install packages that contain hard links |
+| 22 | Access | `dropbear reinstall` could silently lock you out |
+| 23 | Standalone | One jar had to work with no Bukkit on the classpath |
 
 ---
 
@@ -788,12 +791,72 @@ mistake into a recurring lockout.
 
 ---
 
+## Standalone mode (`server.jar`)
+
+### Problem 23 — the same jar had to work with no Bukkit on the classpath
+
+**Goal.** Launching the jar directly (`java -jar`, e.g. renamed `server.jar`)
+should give a Linux shell box on a Minecraft host with no Minecraft server
+running: same `plugins/Harbor` data folder, same config, same rootfs, same
+dropbear — but nothing registered with Bukkit, and every console line run in the
+rootfs.
+
+**Cause of the difficulty.** `HarborManager` and `Dropbear` took a `HarborPlugin`
+(a `JavaPlugin`) and called Bukkit APIs (`getConfig()`, `getDataFolder()`,
+`getLogger()`, `isSilent()`), and `config()` even returned Bukkit's
+`FileConfiguration`. Under `java -jar` there is no Bukkit, so those classes would
+fail to link.
+
+**Fix.** The core is now Bukkit-free and both front-ends are thin:
+
+| Piece | Role |
+|---|---|
+| `HarborConfig` | the five config reads Harbor needs (`getString`/`getBoolean`/`getInt`/`getLong`/`getStringList`) |
+| `BukkitConfig` | `HarborConfig` over Paper's `FileConfiguration` (plugin mode only) |
+| `YamlConfig` | `HarborConfig` over bundled, relocated SnakeYAML (standalone only) |
+| `HarborManager` | `(File dataFolder, HarborConfig, Logger)` — no Bukkit imports at all |
+| `HarborBoot` | the dropbear-then-`startup-commands` sequence, shared by both modes |
+| `HarborPlugin` | plugin front-end: `plugin.yml`, `/sh`, `/harbor` |
+| `HarborMain` + `HarborConsole` | standalone front-end: `Main-Class`, console loop |
+
+`HarborMain`'s class graph never touches `org.bukkit`, so `java -jar` works with
+an empty classpath; Paper still reads `plugin.yml` and never loads `HarborMain`.
+
+**SnakeYAML.** The config is YAML and Bukkit's parser is not available standalone,
+so SnakeYAML is now a real dependency, bundled by the Shadow plugin and
+**relocated** to `dev.triassic.harbor.lib.snakeyaml`. Without the relocation,
+Bukkit's parent-first classloader would hand our code Paper's copy of SnakeYAML
+rather than ours — which works right up until the versions disagree.
+
+**Console rules.** `/harbor ...` is reserved for Harbor (`status`, `install`,
+`reinstall`, `boot`, `dropbear <start|reinstall|stop>`, `exec`, `help`); `/sh ...`
+is accepted as an alias; **every other line is run verbatim in the rootfs**.
+Lines are read on the calling thread and executed one at a time on a worker
+thread, so a hung command cannot block the console.
+
+**Gotcha found while testing.** `/harbor boot` on a rootfs that was never
+installed was noisy — it tried to set up dropbear in a nonexistent rootfs. It now
+reports `rootfs not installed yet` and returns.
+
+**Verified.** Throwaway Paper 1.20.4: `Loading server plugin Harbor v1.1.0` →
+`Enabling Harbor v1.1.0` → `Done (4.127s)`, with `/harbor status` and
+`/sh echo hi` both dispatched. Standalone `java -jar` in a scratch directory:
+`plugins/Harbor/` created, `config.yml` written, `/harbor status` and the shell
+path reachable, clean exit on stdin EOF, and the real deployment's `config.yml`
+parsed correctly (nested `dropbear:` block → `port 3111`, `startup-commands`
+list, UTF-8 BOM tolerated).
+
+---
+
 ## Verification performed
 
 | Check | Result |
 |---|---|
-| Gradle wrapper build | `BUILD SUCCESSFUL`; `Harbor-1.0.0.jar` ~29 KB |
-| Jar contents | 6 classes + `config.yml` + `plugin.yml` |
+| Gradle wrapper build | `BUILD SUCCESSFUL`; `Harbor-1.1.0.jar` ~379 KB (shaded) |
+| Jar contents | `plugin.yml`, `config.yml`, `Main-Class`, SnakeYAML relocated (`org/yaml/*` = 0 entries) |
+| Plugin mode (throwaway Paper 1.20.4) | `Loading`/`Enabling Harbor v1.1.0`, `Done (4.127s)`; `/harbor status` + `/sh` both dispatched |
+| Standalone (`java -jar`) | `plugins/Harbor/` + `config.yml` created; console → rootfs shell; clean EOF exit |
+| Standalone config parse | real deployment `config.yml` → `port 3111`, 1 startup command, UTF-8 BOM tolerated |
 | All pinned URLs (rootfs + apk-tools, x86_64 & aarch64) | HTTP 200 |
 | `/sh echo $HOME` | `/root` (host leak fixed) |
 | `/sh` unlimited timeout | 3 s run → exit 0 at ~3068 ms |
@@ -831,14 +894,18 @@ mistake into a recurring lockout.
 
 | File | Responsibility |
 |---|---|
-| `HarborPlugin.java` | `onEnable`, silent async install → boot, `bootAsync`, `ensureInstalledAsync` |
+| `HarborPlugin.java` | plugin front-end: `onEnable`, silent async install → boot, `bootAsync`, `ensureInstalledAsync` |
+| `HarborMain.java` | standalone front-end: `Main-Class`, data folder + config bootstrap, boot, console |
+| `HarborConsole.java` | standalone console loop: `/harbor` management, everything else → rootfs shell |
+| `HarborBoot.java` | shared dropbear → `startup-commands` boot sequence |
+| `HarborConfig.java` / `BukkitConfig.java` / `YamlConfig.java` | config abstraction: Bukkit-backed (plugin) and SnakeYAML-backed (standalone) |
 | `HarborManager.java` | proot exec, install/download, env pinning, timeout + drain logic, `detach()` |
 | `Dropbear.java` | packages, host keys, key conversion, `authorized_keys`, launch, reporting |
 | `ShCommand.java` | `/sh` with `harbor.shell`, unlimited default timeout, chunked output |
 | `HarborCommand.java` | `/harbor status\|install\|reinstall\|boot\|dropbear\|exec` |
-| `src/main/resources/config.yml` | versions, timeout, `proot-link2symlink`, `dropbear:` block, `startup-commands:` |
+| `src/main/resources/config.yml` | versions, timeout, `proot-link2symlink`, `real-pwd-mount`, `dropbear:` block, `startup-commands:` |
 | `src/main/resources/plugin.yml` | commands + `harbor.shell` / `harbor.admin` |
-| `build.gradle` | Gradle build, `paper-api` `compileOnly` |
+| `build.gradle` | Gradle build, `paper-api` `compileOnly`, Shadow + relocated SnakeYAML, `Main-Class` |
 
 ### The five changes that mattered most
 

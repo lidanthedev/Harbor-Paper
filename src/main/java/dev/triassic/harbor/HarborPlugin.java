@@ -18,14 +18,16 @@ public final class HarborPlugin extends JavaPlugin {
 
     private HarborManager harborManager;
     private Dropbear dropbear;
+    private HarborBoot harborBoot;
     private final AtomicBoolean installRunning = new AtomicBoolean(false);
     private final AtomicBoolean bootRunning = new AtomicBoolean(false);
 
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        this.harborManager = new HarborManager(this);
+        this.harborManager = new HarborManager(getDataFolder(), new BukkitConfig(getConfig()), getLogger());
         this.dropbear = new Dropbear(harborManager);
+        this.harborBoot = new HarborBoot(harborManager, dropbear);
 
         if (getCommand("sh") != null) {
             ShCommand sh = new ShCommand(this);
@@ -77,25 +79,16 @@ public final class HarborPlugin extends JavaPlugin {
         getServer().getScheduler().runTaskAsynchronously(this, () -> {
             List<String> report = new ArrayList<>();
             try {
-                if (dropbear.isEnabled()) {
-                    // Boot: cheap restart when it is already set up, full setup otherwise.
-                    Dropbear.Result r = dropbear.start();
-                    if (!r.ok && r.needsSetup) {
-                        r = dropbear.reinstall();
-                    }
-                    String line = "[dropbear] " + (r.ok ? "listening" : "FAILED")
-                            + " on port " + r.port
-                            + (r.fingerprint.isEmpty() ? "" : " | " + r.fingerprint)
-                            + (r.notes.isEmpty() ? "" : " | " + r.notes);
-                    report.add(line);
-                    if (!isSilent() || !r.ok) {
-                        getLogger().info(line);
+                HarborBoot.BootReport boot = harborBoot.run();
+                if (boot.dropbearLine != null) {
+                    report.add(boot.dropbearLine);
+                    if (!isSilent() || !boot.dropbearOk) {
+                        getLogger().info(boot.dropbearLine);
                     } else {
-                        getLogger().fine(line);
+                        getLogger().fine(boot.dropbearLine);
                     }
                 }
-                report.addAll(harborManager.runStartupCommands(
-                        getConfig().getStringList("startup-commands")));
+                report.addAll(boot.startupLines);
             } catch (Exception e) {
                 getLogger().warning("[Harbor] boot tasks failed: " + e);
             } finally {

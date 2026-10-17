@@ -1,6 +1,12 @@
 # Harbor (Paper port of RealTriassic/Harbor)
 # Whole rootfs lives in plugins/Harbor/container, marker file .installed included.
 # Silent by default: only fine-level logging, no banner, no GoTTY.
+#
+# This one file is read in both modes:
+#   * plugin  - Paper loads plugins/Harbor-1.1.0.jar and registers /sh + /harbor
+#   * standalone - the jar launched directly (java -jar, e.g. renamed server.jar):
+#     plugins/Harbor is still created next to the jar, and every line typed into
+#     the console is run in the rootfs ("/harbor ..." manages Harbor).
 
 silent: true
 

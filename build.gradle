@@ -1,9 +1,10 @@
 plugins {
     id 'java'
+    id 'com.gradleup.shadow' version '8.3.5'
 }
 
 group = 'dev.triassic'
-version = '1.0.0'
+version = '1.1.0'
 description = 'Run Alpine Linux minirootfs inside plugins/Harbor with /sh. Paper port of RealTriassic/Harbor.'
 
 repositories {
@@ -13,6 +14,10 @@ repositories {
 
 dependencies {
     compileOnly 'io.papermc.paper:paper-api:1.20.4-R0.1-SNAPSHOT'
+    // Bundled + relocated so the same jar also runs standalone (as server.jar)
+    // with no Bukkit on the classpath. Relocation keeps it clear of the copy
+    // Paper ships in plugin mode.
+    implementation 'org.yaml:snakeyaml:2.2'
 }
 
 java {
@@ -25,7 +30,22 @@ tasks.withType(JavaCompile).configureEach {
     options.release = 17
 }
 
-// Plain jar is directly droppable into plugins/ (paper-api is compileOnly).
-jar {
+// One jar, two entry points:
+//   * in plugins/  -> normal Paper plugin (plugin.yml -> HarborPlugin)
+//   * java -jar    -> standalone shell box (Main-Class -> HarborMain)
+tasks.named('jar') { enabled = false }
+tasks.named('assemble') { dependsOn tasks.named('shadowJar') }
+
+shadowJar {
     archiveBaseName = 'Harbor'
+    archiveClassifier = ''
+    relocate 'org.yaml.snakeyaml', 'dev.triassic.harbor.lib.snakeyaml'
+    mergeServiceFiles()
+    manifest {
+        attributes(
+                'Main-Class': 'dev.triassic.harbor.HarborMain',
+                'Implementation-Title': 'Harbor',
+                'Implementation-Version': project.version
+        )
+    }
 }

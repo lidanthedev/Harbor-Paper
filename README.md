@@ -5,6 +5,10 @@ Upstream script is cloned at `../harbor-upstream/harbor.sh` for reference.
 This port moves `ROOTFS_DIR` from `/home/container` to `plugins/Harbor/container`
 and wraps install + exec in a silent Paper plugin.
 
+The same jar also runs **standalone**: launched directly (`java -jar`, e.g. as
+`server.jar`) it needs no Paper at all — the console becomes a shell into the
+same rootfs. See [Run as server.jar](#run-as-serverjar-standalone).
+
 ## What you get
 
 - Silent: no banner, no GoTTY, no blocking. Install runs async on enable.
@@ -17,6 +21,8 @@ and wraps install + exec in a silent Paper plugin.
   - `plugins/Harbor/container/` (+ `.installed` marker, `usr/local/bin/proot`, `etc/resolv.conf`)
   - temp downloads in system tmp `harbor-Harbor/`
 - Auto dropbear on every boot (see below), plus config `startup-commands`.
+- Dual mode, one jar: a Paper plugin in `plugins/`, or a standalone shell box
+  when run directly as `server.jar` (no Bukkit involved — see below).
 
 ## Auto dropbear (unprivileged-container path)
 
@@ -97,7 +103,8 @@ Run them again any time with `/harbor boot`.
 - Linux server (`proot` static binaries are Linux-only). Gracefully refuses on Windows/macOS.
 - `x86_64` or `aarch64`.
 - System `tar`, `chmod`, `curl`-equivalent (Java downloads), internet.
-- Paper 1.13+ (built against 1.20.4, Java 17).
+- Paper 1.13+ (built against 1.20.4, Java 17) for plugin mode; standalone mode
+  needs only Java 17+ and no Paper.
 
 ## Build (Gradle wrapper, no install needed)
 
@@ -105,12 +112,17 @@ Run them again any time with `/harbor boot`.
 cd Harbor-Paper
 ./gradlew build        # Linux
 .\gradlew.bat build    # Windows
-# jar: build/libs/Harbor-1.0.0.jar
+# jar: build/libs/Harbor-1.1.0.jar   (shaded: SnakeYAML bundled + relocated)
 ```
 
 Drop the jar in `plugins/`, restart. First enable downloads (~5MB Alpine
 minirootfs + apk-tools-static + proot static) and runs
 `apk.static --root plugins/Harbor/container add alpine-base apk-tools` once.
+
+The jar is shaded by the Shadow plugin (Gradle 8.10.2 → `com.gradleup.shadow`
+8.3.5): SnakeYAML is bundled and relocated to
+`dev.triassic.harbor.lib.snakeyaml`, so it never collides with Paper's own copy
+in plugin mode. That relocation is what makes one file safe in both modes.
 
 ## Use
 
@@ -173,6 +185,41 @@ returned. Output capture is capped at 8 MiB per command either way, so a runaway
 command cannot exhaust memory (stdout is drained on a separate thread, so long
 runs cannot deadlock on a full pipe).
 
+## Run as server.jar (standalone)
+
+The same jar is a self-contained program. Name it `server.jar`, point the panel's
+startup command at it, and Harbor runs with **no Paper and no Bukkit**:
+
+```sh
+java -jar server.jar
+```
+
+- It still creates and uses `plugins/Harbor/` next to the working directory
+  (`plugins/Harbor/config.yml`, `plugins/Harbor/container/`), so an existing
+  install is picked up unchanged.
+- **Nothing is registered with Bukkit/Paper** — there is no server to register
+  with.
+- **Every line typed into the console is run in the rootfs**, exactly like `/sh`:
+
+  ```
+  ls /etc
+  apk add -q htop && htop --version
+  cat /mnt/server.properties
+  ```
+
+- `/harbor ...` is reserved for Harbor itself: `status`, `install`, `reinstall`,
+  `boot`, `dropbear <start|reinstall|stop>`, `exec <command>`, `help`.
+  `/sh <command>` is accepted as an alias for the shell, so muscle memory from
+  plugin mode still works.
+- dropbear is set up exactly as in plugin mode (same code path), so SSH works
+  identically. The dropbear line is always printed at boot so you can see the
+  port and fingerprint.
+- `silent: true` still keeps Harbor's own fine-level chatter off; the `$ command`
+  echo and the command output always show, since the console is the interface.
+
+Useful when you want a Linux box on a Minecraft host without running Minecraft
+at all — or to bootstrap the rootfs before ever starting Paper.
+
 ## Config (`plugins/Harbor/config.yml`)
 
 ```yaml
@@ -192,10 +239,15 @@ startup-commands: ["echo harbor booted at $(date)"]
 Bump versions together to track Alpine releases. Upstream pins are kept as
 defaults for compatibility.
 
+The same file is read in both modes: plugin mode reads it through Bukkit,
+standalone mode parses it with the bundled SnakeYAML. The keys are identical,
+and missing keys fall back to the defaults above.
+
 ## Notes vs upstream
 
 - No GoTTY terminal sharing (would break silence / open ports on MC hosts).
 - No interactive `/bin/sh` session — Pterodactyl console is replaced by `/sh`.
   If you need a shell loop, use `/sh ash` style one-liners or add a
-  persistent session task.
+  persistent session task. Standalone mode is the exception: there the console
+  *is* the shell.
 - License: GPL-3.0 (same as upstream).

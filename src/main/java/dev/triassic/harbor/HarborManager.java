@@ -237,7 +237,15 @@ public final class HarborManager {
         List<String> cmd = new ArrayList<>();
         cmd.add(prootBin.getAbsolutePath());
         cmd.add("--rootfs=" + rootfsDir.getAbsolutePath());
-        cmd.add("--link2symlink");
+        // --link2symlink emulates hard links with symlinks. Only needed on
+        // filesystems without real hard-link support (some FUSE/exFAT mounts).
+        // On a normal ext4/overlayfs volume it breaks `apk` installs of
+        // packages containing hardlinks (gcc/g++/binutils fail to install with
+        // "Operation not permitted") and litters the rootfs with un-removable
+        // .l2s.* chains, so it is opt-in.
+        if (plugin.getConfig().getBoolean("proot-link2symlink", false)) {
+            cmd.add("--link2symlink");
+        }
         // Deliberately NOT passing --kill-on-exit: its entire job is to kill
         // every tracee when proot exits, which makes it impossible to leave a
         // backgrounded daemon (dropbear) running after this one-shot session

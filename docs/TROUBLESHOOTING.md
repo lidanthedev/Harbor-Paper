@@ -46,7 +46,7 @@ plugin rootfs at `plugins/Harbor/container`.
 
 ---
 
-## Environment / topology
+## Environment
 
 ```
 Pterodactyl container (unprivileged, seccomp-restricted)
@@ -648,6 +648,73 @@ process name.
 
 ---
 
+## Installing a toolchain (`apk add gcc` / `build-base`)
+
+### Problem 21 — `apk` cannot install packages that contain hard links
+
+**Symptom.** `apk add gcc`, `apk add g++` or `apk add build-base` report errors
+and leave the compiler half-installed:
+
+```
+ERROR: Failed to create usr/bin/x86_64-alpine-linux-musl-gcc: Operation not permitted
+ERROR: gcc-14.2.0-r6: failed to rename usr/bin/.apk.6d28… to usr/bin/gcc.
+```
+
+`gcc --version` then fails (`gcc: not found`) even though `apk info -e gcc` says
+the package is installed. `g++` fails the same way, and so does `binutils`
+(`ld`, `as`, …).
+
+**Cause.** Alpine ships those binaries as **hard links** — e.g.
+`usr/bin/x86_64-alpine-linux-musl-gcc-14.2.0` with
+`usr/bin/x86_64-alpine-linux-musl-gcc` linked to it. `apk` creates each link
+with `linkat(2)` and then renames the extracted temp file into place.
+
+Harbor used to pass proot `--link2symlink`, which rewrites every `link`/`linkat`
+into a **symlink** through a hidden `.l2s.` name. That emulation only makes sense
+on filesystems that cannot create real hard links, and it is buggy once links
+chain: proot builds `.l2s..l2s.…` double-prefixed names, the follow-up `rename`
+fails with `EPERM`, and the rootfs fills with junk that can no longer be removed
+(`rm` also returns `EPERM`). A live `strace` showed exactly this:
+
+```
+linkat(3, "usr/bin/.apk.c86adac4…", 3, "usr/bin/.apk.616ee3c7…", 0) = -1 EPERM
+```
+
+The container volume is ordinary ext4/overlayfs, where real hard links work, so
+`--link2symlink` was pure downside here.
+
+**Fix.** Do not pass `--link2symlink` by default. It is now opt-in:
+
+```yaml
+# config.yml
+proot-link2symlink: false
+```
+
+Turn it on only if `apk add` fails with genuine hard-link errors
+(`cross-device link` / `EPERM`) on a filesystem that really lacks hard links.
+
+**Repairing an already-broken rootfs.** With the option off, re-extract the
+affected packages so they get real hard links instead of `.l2s.` symlinks:
+
+```sh
+apk fix                              # re-extracts packages with missing files
+apk del gcc g++ binutils             # or drop + re-add
+apk add --no-cache build-base
+```
+
+If `apk` still refuses (because it believes the package is installed), the files
+can be restored directly: `apk fetch <pkg>` downloads the `.apk`, which is a
+concatenation of three gzip streams (signature, control, data). Extracting the
+**third** stream with Python (`zlib` + `tarfile`) and writing its members,
+creating hard links with `os.link`, bypasses `apk`'s extraction entirely. That is
+how the gcc/g++/binutils toolchain was restored on the live box while diagnosing
+this.
+
+**Lesson.** `--link2symlink` is a workaround for hard-link-less filesystems, not
+a default. On a normal volume it silently corrupts package installs.
+
+---
+
 ## Verification performed
 
 | Check | Result |
@@ -696,7 +763,7 @@ process name.
 | `Dropbear.java` | packages, host keys, key conversion, `authorized_keys`, launch, reporting |
 | `ShCommand.java` | `/sh` with `harbor.shell`, unlimited default timeout, chunked output |
 | `HarborCommand.java` | `/harbor status\|install\|reinstall\|boot\|dropbear\|exec` |
-| `src/main/resources/config.yml` | versions, timeout, `dropbear:` block, `startup-commands:` |
+| `src/main/resources/config.yml` | versions, timeout, `proot-link2symlink`, `dropbear:` block, `startup-commands:` |
 | `src/main/resources/plugin.yml` | commands + `harbor.shell` / `harbor.admin` |
 | `build.gradle` | Gradle build, `paper-api` `compileOnly` |
 

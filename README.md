@@ -66,9 +66,15 @@ dropbear:
   allow-password-login: false
 ```
 
-Then, from your machine (SOCKS tunnel):
+Then, from your machine — a normal interactive shell:
 
-```powershell
+```sh
+ssh -p 25584 root@<panel-host>
+```
+
+…or a SOCKS tunnel, if you would rather route other traffic through it:
+
+```sh
 ssh -p 25584 root@<panel-host> -D 127.0.0.1:1080 -N -o ServerAliveInterval=60
 ```
 
@@ -117,9 +123,15 @@ minirootfs + apk-tools-static + proot static) and runs
 /harbor dropbear start
 ```
 
-Each `/sh` is one-shot: `proot --rootfs=... --link2symlink
---root-id --cwd=/root --bind=/proc --bind=/dev --bind=/sys --bind=/tmp
-/bin/sh -c "<command>"` with `PROOT_NO_SECCOMP=1`.
+Each `/sh` is one-shot: `proot --rootfs=... --root-id --cwd=/root
+--bind=/proc --bind=/dev --bind=/sys --bind=/tmp /bin/sh -c "<command>"`
+with `PROOT_NO_SECCOMP=1`. proot's `--link2symlink` is **not** passed by default:
+it only helps on
+filesystems that cannot create real hard links, and on a normal ext4/overlayfs
+volume it breaks `apk` installs of packages that ship hardlinked binaries
+(gcc/g++/binutils) and leaves un-removable `.l2s.*` chains. Enable it with
+`proot-link2symlink: true` if your volume really lacks hard-link support. See
+[`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md) (Problem 21).
 
 proot's `--kill-on-exit` is deliberately **not** passed: it kills every tracee
 when proot exits, which would make backgrounded daemons (dropbear) impossible to
@@ -141,6 +153,7 @@ alpine-version: "3.22"
 alpine-full-version: "3.22.6"
 apk-tools-version: "2.14.12-r0"
 proot-version: "5.3.0"
+proot-link2symlink: false         # only for filesystems without hard links
 command-timeout-seconds: 0        # 0 = no timeout
 dns: ["1.1.1.1", "1.0.0.1"]
 dropbear: { enabled: true, port: 25584, authorized-key: "", allow-password-login: false }

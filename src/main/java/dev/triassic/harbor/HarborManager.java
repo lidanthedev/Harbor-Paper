@@ -478,6 +478,14 @@ public final class HarborManager {
         // keep environment minimal but functional
         pb.environment().put("PROOT_NO_SECCOMP", "1");
         Process p = pb.start();
+        // Children get a pipe for stdin that we never write to. A child that
+        // reads stdin would then block forever: no data, and because we still
+        // hold the write end, never an EOF either. Close it so reads see EOF.
+        try {
+            p.getOutputStream().close();
+        } catch (java.io.IOException ignored) {
+            // process already exited
+        }
 
         // Drain stdout/stderr on a thread so a long or unlimited run cannot
         // fill the OS pipe buffer and deadlock the child.
@@ -539,12 +547,47 @@ public final class HarborManager {
         }
     }
 
+    /** Backstop for a download that never finishes (see {@link #download}). */
+    private static final long DOWNLOAD_TIMEOUT_SECONDS = 300;
+
+    /**
+     * Bound the whole download, not just the socket.
+     *
+     * `setConnectTimeout` does not cover name resolution, and following a
+     * redirect resolves another host, so a resolver that accepts the query and
+     * never answers blocks the thread with no timeout at all. That is the
+     * "still installing since yesterday" failure. The socket timeouts in
+     * {@link #fetch} still give precise errors for ordinary stalls; this is the
+     * backstop that guarantees the install either makes progress or gives up.
+     */
     private void download(String url, File dest) throws Exception {
+        final Exception[] failed = new Exception[1];
+        Thread fetch = new Thread(() -> {
+            try {
+                fetch(url, dest);
+            } catch (Exception e) {
+                failed[0] = e;
+            }
+        }, "harbor-download");
+        fetch.setDaemon(true);
+        fetch.start();
+        fetch.join(DOWNLOAD_TIMEOUT_SECONDS * 1000L);
+        if (fetch.isAlive()) {
+            throw new IllegalStateException("Download of " + url + " did not finish within "
+                    + DOWNLOAD_TIMEOUT_SECONDS + "s - the network or DNS is stalling "
+                    + "(check the container's /etc/resolv.conf)");
+        }
+        if (failed[0] != null) {
+            throw failed[0];
+        }
+    }
+
+    private void fetch(String url, File dest) throws Exception {
         HttpURLConnection con = (HttpURLConnection) new URL(url).openConnection();
         con.setConnectTimeout(30000);
         con.setReadTimeout(60000);
         con.setInstanceFollowRedirects(true);
-        con.setRequestProperty("User-Agent", "Harbor-Paper/1.0.0");
+        con.setRequestProperty("User-Agent", "Harbor-Paper/1.1.0");
         int code = con.getResponseCode();
         if (code < 200 || code >= 300) {
             throw new IllegalStateException("Download failed HTTP " + code + ": " + url);

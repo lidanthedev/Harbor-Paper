@@ -81,6 +81,7 @@ public final class HarborMain {
                 // everything until boot is done.
                 logger.setLevel(Level.ALL);
             }
+            Thread heartbeat = firstRun ? startInstallHeartbeat() : null;
             try {
                 if (firstRun && !manager.ensureInstalled()) {
                     System.out.println("[Harbor] install FAILED - see above; retry with /harbor install");
@@ -98,6 +99,9 @@ public final class HarborMain {
                 System.out.println("[Harbor] startup failed: " + t);
                 System.out.flush();
             } finally {
+                if (heartbeat != null) {
+                    heartbeat.interrupt();
+                }
                 logger.setLevel(silent ? Level.INFO : Level.ALL);
                 console.startingDone();
             }
@@ -106,6 +110,32 @@ public final class HarborMain {
         startup.start();
 
         console.run();
+    }
+
+    /**
+     * A multi-minute install that prints nothing is indistinguishable from a
+     * hang - which is exactly how a first run was reported. Print elapsed time
+     * every 30s so the panel console shows whether the install is alive.
+     */
+    private static Thread startInstallHeartbeat() {
+        Thread heartbeat = new Thread(() -> {
+            long start = System.currentTimeMillis();
+            try {
+                while (true) {
+                    Thread.sleep(30_000);
+                    System.out.println("[Harbor] still installing ... "
+                            + (System.currentTimeMillis() - start) / 1000
+                            + "s elapsed (/harbor status to check)");
+                    System.out.flush();
+                }
+            } catch (InterruptedException done) {
+                // install finished; the finally block interrupts us
+            }
+        }, "harbor-install-heartbeat");
+        // Daemon: never keeps the JVM alive on its own.
+        heartbeat.setDaemon(true);
+        heartbeat.start();
+        return heartbeat;
     }
 
     private static void writeResource(String resource, File dest) throws Exception {

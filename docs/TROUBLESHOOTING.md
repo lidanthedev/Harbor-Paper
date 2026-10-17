@@ -1315,9 +1315,19 @@ running" sentinel). A running pass is unchanged: `in progress (Ns) - <phase>`,
 still advancing. `Boot: complete in 21s` now means the pass took 21 s and stays
 21 s.
 
-**Verified.** `Harbor-1.1.4.jar`, live: the boot pass after a restart reported
-its real duration, and repeated `/harbor status` calls returned the identical
-value instead of a growing one.
+**Verified.** `Harbor-1.1.4.jar`, live (aarch64 panel box), after a real restart:
+the pass ran 15:24:14.280 → 15:24:19.457 — **5.2 s** — and `/harbor status`
+reported
+
+```
+Boot: complete in 5s
+```
+
+The same command 2.5 minutes later still returned **5s**; the old code had
+already inflated that to ~150s by then. A running pass is unchanged:
+`Boot: in progress (Ns) - <phase>`, number advancing. Locally, three
+`/harbor status` calls 3 s apart with a faked install marker all printed
+`complete in 0s` (previously they would have read 0s, 3s, 6s).
 
 ### Problem 32 — the panel never left "starting", and the fake `Done (...)` line lied
 
@@ -1352,9 +1362,20 @@ the panel matches the console text as-is. Empty (default) prints nothing, so
 existing installs are unaffected. Standalone only: in plugin mode Paper prints
 its own `Done (…)`. Delete the echoing `startup-commands` entry when you set it.
 
-**Verified.** `Harbor-1.1.4.jar`, live: with the option set, the boot end prints
-`Done (Ns)! For help, type "help"` with the pass's real seconds and the panel
-leaves `starting`; with `panel-done-line: ""` nothing extra is printed.
+**Verified.** `Harbor-1.1.4.jar`, live: the faked `startup-commands` echo deleted
+and `panel-done-line: 'Done (%ds)! For help, type "help"'` set, the boot console
+ends with
+
+```
+[dropbear] listening on port 25584 | 256 SHA256:rClOKMZhZ77FyR6DmX7WDqQ+0OAN84Trv9bvaZC8lQU ...
+Done (5s)! For help, type "help"
+```
+
+for a pass that took 5.2 s, and the panel's state moved from `starting` to
+**`running`** on that line alone — `/harbor status`'s `Startup cmds:` dropped
+2 → 1, i.e. nothing is faking it any more. Locally (faked install marker) the
+same run printed `Done (0s)! For help, type "help"`; with `panel-done-line: ""`
+nothing extra appears.
 
 ---
 
@@ -1368,6 +1389,8 @@ leaves `starting`; with `panel-done-line: ""` nothing extra is printed.
 | Standalone (`java -jar`) | `plugins/Harbor/` + `config.yml` created; console → rootfs shell; clean EOF exit |
 | Standalone `stop` / `end` (Problem 28) | `stop`, `end`, `/stop`, `STOP` → two lines + exit 0 in <1 s; a normal line still takes the rootfs path |
 | `/harbor status` during a pass (Problem 30) | prints `Boot: complete in 0s` / `Boot: in progress (62s) - <phase>` |
+| `/harbor status` after a pass (Problem 31) | live 1.1.4: `Boot: complete in 5s` for a 5.2 s pass, still `5s` 2.5 min later (old code kept counting up); locally `complete in 0s` on three calls 3 s apart |
+| `panel-done-line` (Problem 32) | live 1.1.4: boot ends with `Done (5s)! For help, type "help"` for a 5.2 s pass and the panel state moves `starting` → `running` with no faked startup command |
 | Standalone config parse | real deployment `config.yml` → `port 3111`, 1 startup command, UTF-8 BOM tolerated |
 | All pinned URLs (rootfs + apk-tools, x86_64 & aarch64) | HTTP 200 |
 | `/sh echo $HOME` | `/root` (host leak fixed) |

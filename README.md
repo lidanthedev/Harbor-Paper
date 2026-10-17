@@ -9,6 +9,17 @@ The same jar also runs **standalone**: launched directly (`java -jar`, e.g. as
 `server.jar`) it needs no Paper at all — the console becomes a shell into the
 same rootfs. See [Run as server.jar](#run-as-serverjar-standalone).
 
+> ## 🎓 For educational purposes
+>
+> This project is published to learn from: it exists to show how far a
+> proot-based Alpine userland can be pushed inside an unprivileged Minecraft
+> container, and how a Paper plugin and a plain `java -jar` front-end can share
+> one rootfs. It is **not** a product — no warranty, no support, no fitness for
+> any particular purpose, and it is not affiliated with Mojang, PaperMC,
+> RealTriassic or Pterodactyl. Use it at your own risk, and only on servers you
+> own or are authorised to modify; the security note below is real, not
+> boilerplate.
+
 > ## ⚠️ `harbor.shell` is root-equivalent on the server
 >
 > `/sh` is **full read/write access to the server's filesystem — it is not a
@@ -285,4 +296,6 @@ and missing keys fall back to the defaults above.
   If you need a shell loop, use `/sh ash` style one-liners or add a
   persistent session task. Standalone mode is the exception: there the console
   *is* the shell.
+- Educational project, provided as-is: no warranty, no support — see the note at
+  the top.
 - License: GPL-3.0 (same as upstream).

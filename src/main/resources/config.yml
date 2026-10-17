@@ -1,0 +1,58 @@
+# Harbor (Paper port of RealTriassic/Harbor)
+# Whole rootfs lives in plugins/Harbor/container, marker file .installed included.
+# Silent by default: only fine-level logging, no banner, no GoTTY.
+
+silent: true
+
+# Pinned versions (bump together).
+# v3.18 pins 404 upstream (apk-tools-static pruned from CDN), so we track Alpine 3.22:
+# minirootfs 3.22.6 + apk-tools-static 2.14.12-r0 verified on dl-cdn 2026-10-17.
+# Alpine 3.22 branch: https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/
+alpine-version: "3.22"
+alpine-full-version: "3.22.6"
+apk-tools-version: "2.14.12-r0"
+proot-version: "5.3.0"
+
+# Seconds before /sh is killed. 0 = no timeout (wait as long as it takes).
+# Output capture is capped at 8 MiB per command regardless.
+command-timeout-seconds: 0
+
+# DNS written to container/etc/resolv.conf on install.
+dns:
+  - "1.1.1.1"
+  - "1.0.0.1"
+
+# ---------------------------------------------------------------------------
+# Auto dropbear (SSH into the container) in an unprivileged container.
+#
+# The container is unprivileged, which breaks the normal path in three ways and
+# this setup compensates automatically:
+#   * dropbearkey cannot write keys (container seccomp blocks getrandom)
+#     -> host keys are generated with OpenSSH `ssh-keygen -A` instead
+#   * dropbear needs its own key format / the right subpackage
+#     -> `apk add dropbear dropbear-convert` + `dropbearconvert`
+#   * dropbear resolves the user home from /etc/passwd, not $HOME
+#     -> authorized_keys is written to /root/.ssh/authorized_keys
+#
+# Runs on every boot after the rootfs exists. Disable with enabled: false.
+# ---------------------------------------------------------------------------
+dropbear:
+  enabled: true
+  # High port; you cannot bind 22 in an unprivileged container. Expose this
+  # port in the panel to reach it from outside.
+  port: 25584
+  # paste the contents of your client's id_ed25519.pub here (single line).
+  # Leave empty to keep whatever already exists in /root/.ssh/authorized_keys.
+  authorized-key: ""
+  # false = key-only auth (-g), which is what you want. true only for debugging.
+  allow-password-login: false
+
+# ---------------------------------------------------------------------------
+# Commands run inside the rootfs, in order, in the background, once per boot
+# after install and dropbear setup. Each entry is passed to /bin/sh -c.
+# $HOME inside these commands is /root. Use "#" for comments.
+# ---------------------------------------------------------------------------
+startup-commands:
+  - "echo harbor booted at $(date)"
+  # - "dropbear -E -K 60 -p 25584 -r /etc/dropbear/dropbear_ed25519_host_key"
+  # - "python3 -m http.server 8000 --directory /root"

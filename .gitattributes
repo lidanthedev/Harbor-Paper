@@ -1,0 +1,15 @@
+# Normalise line endings: repo stores LF, Windows checkouts get CRLF where safe.
+* text=auto
+
+# Shell scripts must stay LF or they break on Linux (gradlew is one of these).
+*.sh text eol=lf
+gradlew text eol=lf
+gradle/wrapper/gradle-wrapper.properties text eol=lf
+
+# Windows batch files want CRLF.
+*.bat text eol=crlf
+
+# Binaries.
+*.jar binary
+*.png binary
+*.gif binary

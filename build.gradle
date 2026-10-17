@@ -1,0 +1,31 @@
+plugins {
+    id 'java'
+}
+
+group = 'dev.triassic'
+version = '1.0.0'
+description = 'Run Alpine Linux minirootfs inside plugins/Harbor with /sh. Paper port of RealTriassic/Harbor.'
+
+repositories {
+    mavenCentral()
+    maven { url 'https://repo.papermc.io/repository/maven-public/' }
+}
+
+dependencies {
+    compileOnly 'io.papermc.paper:paper-api:1.20.4-R0.1-SNAPSHOT'
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+tasks.withType(JavaCompile).configureEach {
+    options.encoding = 'UTF-8'
+    options.release = 17
+}
+
+// Plain jar is directly droppable into plugins/ (paper-api is compileOnly).
+jar {
+    archiveBaseName = 'Harbor'
+}

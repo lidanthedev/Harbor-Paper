@@ -1,0 +1,25 @@
+name: Harbor
+version: '1.0.0'
+main: dev.triassic.harbor.HarborPlugin
+api-version: '1.13'
+description: Run Alpine Linux minirootfs inside plugins/Harbor with root privileges. Paper port of RealTriassic/Harbor.
+author: RealTriassic
+website: https://github.com/RealTriassic/Harbor
+commands:
+  sh:
+    description: Execute a shell command inside the Alpine rootfs (proot).
+    usage: /sh <command>
+    permission: harbor.shell
+    permission-message: You do not have permission to use the shell.
+  harbor:
+    description: Manage the Harbor Alpine rootfs.
+    usage: /harbor <status|install|reinstall|boot|dropbear|exec>
+    permission: harbor.admin
+    permission-message: You do not have permission to manage Harbor.
+permissions:
+  harbor.shell:
+    description: Allows running /sh inside the Harbor rootfs.
+    default: op
+  harbor.admin:
+    description: Allows managing the Harbor rootfs.
+    default: op

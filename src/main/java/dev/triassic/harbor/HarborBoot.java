@@ -35,12 +35,22 @@ public final class HarborBoot {
         this.dropbear = dropbear;
     }
 
-    /** Blocking. Never throws; failures come back as report text. */
-    public BootReport run() {
+    /**
+     * Blocking. Never throws; failures come back as report text.
+     *
+     * @param progress optional sink for phase lines ("setting up dropbear ...").
+     *                 Dropbear setup on a small container is several seconds per
+     *                 rootfs round trip, and startup commands add more; without
+     *                 these lines the only visible thing is elapsed time.
+     */
+    public BootReport run(java.util.function.Consumer<String> progress) {
         String dropbearLine = null;
         boolean dropbearOk = true;
         try {
             if (dropbear.isEnabled()) {
+                if (progress != null) {
+                    progress.accept("[Harbor] setting up dropbear (SSH) ...");
+                }
                 // Boot: cheap restart when it is already set up, full setup otherwise.
                 Dropbear.Result r = dropbear.start();
                 if (!r.ok && r.needsSetup) {
@@ -59,12 +69,20 @@ public final class HarborBoot {
 
         List<String> startupLines;
         try {
-            startupLines = manager.runStartupCommands(
-                    manager.config().getStringList("startup-commands"));
+            List<String> commands = manager.config().getStringList("startup-commands");
+            if (!commands.isEmpty() && progress != null) {
+                progress.accept("[Harbor] running " + commands.size() + " startup command(s) ...");
+            }
+            startupLines = manager.runStartupCommands(commands);
         } catch (Exception e) {
             startupLines = new ArrayList<>();
             startupLines.add("[startup] failed: " + e);
         }
         return new BootReport(dropbearLine, dropbearOk, startupLines);
+    }
+
+    /** Boot with no progress reporting (plugin mode logs its own way). */
+    public BootReport run() {
+        return run(null);
     }
 }

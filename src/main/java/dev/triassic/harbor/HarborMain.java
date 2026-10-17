@@ -3,6 +3,7 @@ package dev.triassic.harbor;
 import java.io.File;
 import java.io.InputStream;
 import java.nio.file.Files;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.logging.Formatter;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -76,6 +77,7 @@ public final class HarborMain {
         // immediately. Doing this inline made the whole program look hung for
         // the minutes a first-run install takes.
         Thread startup = new Thread(() -> {
+            long startedAt = System.currentTimeMillis();
             boolean firstRun = !manager.isInstalled();
             if (firstRun) {
                 System.out.println("[Harbor] first run: installing the Alpine rootfs "
@@ -86,14 +88,20 @@ public final class HarborMain {
                 // everything until boot is done.
                 logger.setLevel(Level.ALL);
             }
-            Thread heartbeat = firstRun ? startInstallHeartbeat() : null;
+            // What the heartbeat says we are doing. A boot that spends minutes
+            // bringing dropbear up used to keep announcing "installing the
+            // rootfs", which reads as a stuck install when the rootfs is in fact
+            // installed and dropbear is already listening.
+            AtomicReference<String> phase = new AtomicReference<>("installing the rootfs");
+            Thread heartbeat = startStartupHeartbeat(phase);
             try {
                 if (firstRun && !manager.ensureInstalled()) {
                     System.out.println("[Harbor] install FAILED - see above; retry with /harbor install");
                     System.out.flush();
                 }
                 if (manager.isInstalled()) {
-                    HarborBoot.BootReport report = boot.run();
+                    phase.set("setting up dropbear + startup commands");
+                    HarborBoot.BootReport report = boot.run(HarborMain::println);
                     // The dropbear line is the SSH entry point: always show it.
                     if (report.dropbearLine != null) {
                         System.out.println(report.dropbearLine);
@@ -104,8 +112,12 @@ public final class HarborMain {
                 System.out.println("[Harbor] startup failed: " + t);
                 System.out.flush();
             } finally {
-                if (heartbeat != null) {
-                    heartbeat.interrupt();
+                heartbeat.interrupt();
+                long took = (System.currentTimeMillis() - startedAt) / 1000;
+                // Only say it when it was slow enough to have raised questions.
+                if (took >= 30) {
+                    System.out.println("[Harbor] startup finished after " + took + "s");
+                    System.out.flush();
                 }
                 logger.setLevel(silent ? Level.INFO : Level.ALL);
                 console.startingDone();
@@ -125,29 +137,35 @@ public final class HarborMain {
     }
 
     /**
-     * A multi-minute install that prints nothing is indistinguishable from a
+     * A multi-minute startup that prints nothing is indistinguishable from a
      * hang - which is exactly how a first run was reported. Print elapsed time
-     * every 30s so the panel console shows whether the install is alive.
+     * every 30s, naming the phase, so the console shows whether the process is
+     * alive and what it is doing.
      */
-    private static Thread startInstallHeartbeat() {
+    private static Thread startStartupHeartbeat(AtomicReference<String> phase) {
+        long start = System.currentTimeMillis();
         Thread heartbeat = new Thread(() -> {
-            long start = System.currentTimeMillis();
             try {
                 while (true) {
                     Thread.sleep(30_000);
-                    System.out.println("[Harbor] still installing ... "
+                    System.out.println("[Harbor] still " + phase.get() + " ... "
                             + (System.currentTimeMillis() - start) / 1000
                             + "s elapsed (/harbor status to check)");
                     System.out.flush();
                 }
-            } catch (InterruptedException done) {
-                // install finished; the finally block interrupts us
+            } catch (InterruptedException finished) {
+                // the startup pass is done and interrupted us
             }
-        }, "harbor-install-heartbeat");
+        }, "harbor-startup-heartbeat");
         // Daemon: never keeps the JVM alive on its own.
         heartbeat.setDaemon(true);
         heartbeat.start();
         return heartbeat;
+    }
+
+    private static void println(String s) {
+        System.out.println(s);
+        System.out.flush();
     }
 
     private static void writeResource(String resource, File dest) throws Exception {

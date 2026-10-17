@@ -710,6 +710,27 @@ creating hard links with `os.link`, bypasses `apk`'s extraction entirely. That i
 how the gcc/g++/binutils toolchain was restored on the live box while diagnosing
 this.
 
+**Do not delete `.l2s.*` files by hand.** They hold the *data* those symlinks
+point at — they are not duplicates. Removing a `.l2s.*` file that is still a
+symlink target turns the visible name into a **dangling** symlink, so the file
+appears to vanish. That is exactly how `/etc/passwd`, `/etc/group` and
+`/etc/shadow` were destroyed on the live box, and `apk fix` cannot repair it,
+because apk treats those paths as protected config files and will not replace an
+existing (even broken) entry — you must `rm` the dangling link first.
+
+If you do want to sweep them, do it only *after* `apk fix`, and only for entries
+that no symlink still references:
+
+```sh
+find / -xdev -type l 2>/dev/null | while read -r l; do
+    case "$(readlink "$l")" in *.l2s.*) [ -e "$l" ] || echo "dangling: $l";; esac
+done
+```
+
+Note: busybox `find` does **not** support `-lname`, so
+`find -type l -lname '*l2s*'` silently matches nothing (its usage error goes to
+stderr). Use the `readlink` + `case` form above.
+
 **Lesson.** `--link2symlink` is a workaround for hard-link-less filesystems, not
 a default. On a normal volume it silently corrupts package installs.
 

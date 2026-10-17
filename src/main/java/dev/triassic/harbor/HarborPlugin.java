@@ -41,9 +41,12 @@ public final class HarborPlugin extends JavaPlugin {
         }
 
         // Silent background install, then boot tasks (dropbear + startup commands).
+        // The whole pass is timed from here so the slow-startup summary reports
+        // what the operator actually waited for (install + boot), not just boot.
+        long enabledAt = System.currentTimeMillis();
         ensureInstalledAsync(ok -> {
             if (ok) {
-                bootAsync(null);
+                bootAsync(null, enabledAt);
             }
         });
     }
@@ -64,12 +67,18 @@ public final class HarborPlugin extends JavaPlugin {
      * Harbor boot sequence, runs once per server start after the rootfs exists:
      *   1. auto-configure + start dropbear
      *   2. run config `startup-commands` in the background
-     * Never blocks; safe to call repeatedly.
+     * Never blocks; safe to call repeatedly. Called by /harbor boot, so a manual
+     * pass reports its own duration.
      */
     public void bootAsync(Consumer<List<String>> done) {
+        bootAsync(done, System.currentTimeMillis());
+    }
+
+    /** @param startedAt when the pass began, for the slow-startup summary. */
+    private void bootAsync(Consumer<List<String>> done, long startedAt) {
         if (!harborManager.isInstalled()) {
             ensureInstalledAsync(ok -> {
-                if (ok) bootAsync(done);
+                if (ok) bootAsync(done, startedAt);
             });
             return;
         }
@@ -80,15 +89,26 @@ public final class HarborPlugin extends JavaPlugin {
             List<String> report = new ArrayList<>();
             try {
                 HarborBoot.BootReport boot = harborBoot.run();
+                long took = (System.currentTimeMillis() - startedAt) / 1000;
                 if (boot.dropbearLine != null) {
                     report.add(boot.dropbearLine);
-                    if (!isSilent() || !boot.dropbearOk) {
+                    // A fast, successful boot stays quiet. A slow one is exactly
+                    // when the operator needs the outcome and not just the
+                    // elapsed time, so surface the dropbear line with the summary.
+                    boolean verbose = !isSilent() || !boot.dropbearOk
+                            || took >= HarborBoot.SLOW_STARTUP_SECONDS;
+                    if (verbose) {
                         getLogger().info(boot.dropbearLine);
                     } else {
                         getLogger().fine(boot.dropbearLine);
                     }
                 }
                 report.addAll(boot.startupLines);
+                // Silent mode hides everything above; a pass this slow must not
+                // be indistinguishable from a hang. Same wording as standalone.
+                if (took >= HarborBoot.SLOW_STARTUP_SECONDS) {
+                    getLogger().info("[Harbor] startup finished after " + took + "s");
+                }
             } catch (Exception e) {
                 getLogger().warning("[Harbor] boot tasks failed: " + e);
             } finally {

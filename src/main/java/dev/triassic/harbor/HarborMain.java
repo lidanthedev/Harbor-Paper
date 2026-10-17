@@ -123,7 +123,7 @@ public final class HarborMain {
                 heartbeat.interrupt();
                 long took = (System.currentTimeMillis() - startedAt) / 1000;
                 // Only say it when it was slow enough to have raised questions.
-                if (took >= 30) {
+                if (took >= HarborBoot.SLOW_STARTUP_SECONDS) {
                     System.out.println("[Harbor] startup finished after " + took + "s");
                     System.out.flush();
                 }

@@ -27,7 +27,9 @@ same rootfs. See [Run as server.jar](#run-as-serverjar-standalone).
 ## What you get
 
 - Silent: no banner, no GoTTY, no blocking. Install runs async on enable.
-  Routine logs go to `fine` when `silent: true` (default).
+  Routine logs go to `fine` when `silent: true` (default). A startup pass slower
+  than ~10 s still prints one summary line (plus the dropbear line), so a slow
+  first boot or dropbear setup is never indistinguishable from a hang.
 - Normal commands:
   - `/sh <command>` — runs `/bin/sh -c "<command>"` inside Alpine via proot.
     Output is sent back to the sender only, chunked. Perm `harbor.shell` (op) —
@@ -255,7 +257,7 @@ at all — or to bootstrap the rootfs before ever starting Paper.
 ## Config (`plugins/Harbor/config.yml`)
 
 ```yaml
-silent: true
+silent: true                      # slow startups (>10s) still print one summary line
 alpine-version: "3.22"
 alpine-full-version: "3.22.6"
 apk-tools-version: "2.14.12-r0"

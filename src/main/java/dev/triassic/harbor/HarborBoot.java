@@ -13,6 +13,16 @@ import java.util.List;
  */
 public final class HarborBoot {
 
+    /**
+     * A startup pass slower than this announces itself even when Harbor is
+     * silent. Silent mode hides install + boot output on purpose, which makes a
+     * container that spends a minute in there indistinguishable from a hung
+     * server; one summary line after the fact is the cheapest way to stay
+     * honest without spamming every normal boot. Steady-state passes are ~5s,
+     * a first-run install or a dropbear setup is tens of seconds.
+     */
+    public static final int SLOW_STARTUP_SECONDS = 10;
+
     /** Outcome of one boot pass, for reporting back to the operator. */
     public static final class BootReport {
         /** "[dropbear] listening on port N | <fingerprint>", or null when disabled. */

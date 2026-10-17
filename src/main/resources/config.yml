@@ -8,6 +8,9 @@
 #     plugins/Harbor is still created next to the jar, and every line typed into
 #     the console is run in the rootfs ("/harbor ..." manages Harbor).
 
+# Even while silent, a startup pass slower than about 10s prints one summary
+# line ("[Harbor] startup finished after 42s", preceded by the dropbear line)
+# so a slow first boot or dropbear setup is never indistinguishable from a hang.
 silent: true
 
 # Pinned versions (bump together).

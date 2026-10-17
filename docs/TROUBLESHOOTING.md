@@ -55,6 +55,7 @@ plugin rootfs at `plugins/Harbor/container`.
 | 30 | Standalone | The heartbeat said "/harbor status to check", but status knew nothing |
 | 31 | Standalone | `/harbor status` reported a 12-minute boot that never happened |
 | 32 | Standalone | The panel never left "starting", and the fake `Done (...)` line lied |
+| 33 | Plugin | `silent: true` hid a slow boot completely in plugin mode |
 
 ---
 
@@ -1376,6 +1377,72 @@ for a pass that took 5.2 s, and the panel's state moved from `starting` to
 2 → 1, i.e. nothing is faking it any more. Locally (faked install marker) the
 same run printed `Done (0s)! For help, type "help"`; with `panel-done-line: ""`
 nothing extra appears.
+
+---
+
+### Problem 33 — plugin mode hid a slow boot completely (`silent: true`)
+
+**Symptom.** On a plugin-mode box (Paper 1.21.11 + `plugins/Harbor-1.1.4.jar`)
+the console went quiet right after startup and stayed quiet for the whole pass.
+A restart on that box shows it exactly:
+
+```
+[15:50:00 INFO]: [Harbor] Loading server plugin Harbor v1.1.4
+[15:50:02 INFO]: [Harbor] Enabling Harbor v1.1.4
+[15:50:03 INFO]: Done (31.286s)! For help, type "help"       <- Paper's line
+```
+
+and then nothing from Harbor: not that the rootfs was being installed, not that
+dropbear was being set up, not that it was listening. Dropbear did come up ~4 s
+later; there was simply no way to tell from the console. The operator, seeing
+the silence, re-ran `/harbor dropbear reinstall` by hand to be sure — the same
+"working or hung?" question Problems 24/26/30 answered for standalone mode,
+still open in plugin mode.
+
+**Cause.** Standalone mode prints a phase line per boot step, a 30 s heartbeat
+and the dropbear line at the end (Problems 24/30). Plugin mode passed no
+progress sink to `HarborBoot.run()` and, with `silent: true` plus a successful
+boot, logged its single report line at `fine`:
+
+```java
+if (!isSilent() || !boot.dropbearOk) {
+    getLogger().info(boot.dropbearLine);
+} else {
+    getLogger().fine(boot.dropbearLine);   // invisible on a normal console
+}
+```
+
+so a boot that succeeded slowly produced no output at all. The heartbeat and
+phase lines were deliberately not ported to plugin mode: Paper's own startup
+output is already noisy, and per-step progress on every restart is exactly the
+spam `silent: true` exists to avoid.
+
+**Fix.** Keep normal boots silent, but never keep a *slow* one silent
+(`HarborBoot.SLOW_STARTUP_SECONDS = 10`, shared with standalone mode):
+
+* a pass of 10 s or more logs `[Harbor] startup finished after 42s` — the same
+  wording standalone mode uses;
+* when the pass was slow the `[dropbear] listening on port …` line is logged at
+  `info` as well, so the summary says *what* became ready, not just how long it
+  took (`silent: false` and failures behave exactly as before);
+* the time is measured from `onEnable`, so a first run's install is included —
+  it is the wait the operator actually experienced, not just the boot step;
+* a steady-state pass (~5 s) still prints nothing.
+
+`/harbor boot` keeps its own timing, so a manual pass reports its own duration
+rather than the time since `onEnable`.
+
+**Verified.** `Harbor-1.1.5.jar`, plugin mode on the panel box (Paper 1.21.11,
+aarch64): with a temporary second `startup-commands` entry forcing a long pass,
+a restart printed
+
+```
+[15:5x:xx INFO]: [dropbear] listening on port 25571 | 256 SHA256:...
+[15:5x:xx INFO]: [Harbor] startup finished after NN s
+```
+
+and, after the temporary entry was removed, a normal restart printed neither
+line while dropbear came up as usual.
 
 ---
 

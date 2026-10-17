@@ -1196,11 +1196,25 @@ the tracer. The 3 s pre-flight keeps its timeout: it is *expected* to end,
 because killing the pre-flight daemon leaves proot with no tracees and proot
 exits by itself.
 
-**Verified.** On the ARM panel container: after `/harbor dropbear start` the new
-listener reported `TracerPid: 376` and logins worked; 300 s later the same
-listener answered *"wrong user root"* and the pid file could not even be read
-over SSH — a clean reproduction of the five-minute window, twice. The fixed
-launcher removes the waiter, so the tracer is never killed.
+**Verified.** A poll every ~30 s on the ARM panel container probed both the
+tracer and a real login (`TracerPid` from `/proc`, plus `ssh … echo AUTH-OK`),
+across two listener restarts:
+
+| Poll (local time) | dropbear | TracerPid | login |
+|---|---|---|---|
+| 16:17:01 … 16:19:35 | 253 | 250 | OK |
+| 16:20:06 … 16:21:07 | 253 | *gone* | `Permission denied (publickey,password)` |
+| 16:21:38 … 16:26:15 | 379 | 376 | OK |
+| 16:26:46 … 16:29:50 | 379 | *gone* | `Permission denied (publickey,password)` |
+
+Window 1: dropbear launched 16:15:06, first failure 16:20:06 — **300 s to the
+second**. Window 2: launched ~16:21:2x, first failure 16:26:46 — the same 300 s,
+inside the poll's granularity. Each listener worked exactly until the
+`INTERNAL_TIMEOUT_SECONDS` wait expired and `destroyForcibly()` removed its
+tracer. The fixed launcher never waits, so there is nothing left to time out.
+Also observed on 1.1.2: the panel console queues behind that same wait, so a
+command sent right after `/harbor dropbear start` sat unexecuted for five
+minutes and then ran.
 
 ### Problem 30 — the heartbeat said "/harbor status to check", but status knew nothing
 

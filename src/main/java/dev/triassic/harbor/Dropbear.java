@@ -139,8 +139,10 @@ public final class Dropbear {
         manager.execShell("mkdir -p /root/.ssh && chmod 700 /root/.ssh");
         if (pubKey != null && !pubKey.isBlank()) {
             manager.writeFileInRootfs("/root/.ssh/authorized_keys", pubKey.trim() + "\n", "600");
-        } else {
-            // migrate anything left in the shell HOME by earlier attempts
+        } else if (!manager.fileExists("/root/.ssh/authorized_keys")) {
+            // Migrate anything left in the shell HOME by earlier attempts, but
+            // never clobber an existing /root/.ssh/authorized_keys: doing so
+            // silently locks out keys that were already working.
             manager.execShell("[ -f /home/container/.ssh/authorized_keys ] && "
                     + "cp /home/container/.ssh/authorized_keys /root/.ssh/authorized_keys "
                     + "&& chmod 600 /root/.ssh/authorized_keys");

@@ -715,6 +715,58 @@ a default. On a normal volume it silently corrupts package installs.
 
 ---
 
+## Access to the rootfs
+
+### Problem 22 — `dropbear reinstall` could silently lock you out
+
+**Symptom.** After a server restart, SSH is refused with
+`Permission denied (publickey,password)` even though the same key worked minutes
+earlier, and dropbear is clearly listening on its port.
+
+**Cause.** `reinstall()` (run at boot when the rootfs has no dropbear setup)
+writes `/root/.ssh/authorized_keys`:
+
+- if `dropbear.authorized-key` is set, it **overwrites** the file with that single
+  key;
+- otherwise it copied `/home/container/.ssh/authorized_keys` over it
+  **unconditionally**.
+
+So a key that had been added out-of-band (or the previous contents) is discarded
+the moment that fallback fires. The file still exists and looks fine — it just no
+longer contains your key, which is why the failure looks like a wrong-key error.
+
+**Fix.** The fallback now only runs when `/root/.ssh/authorized_keys` does not
+already exist, so an existing, working file is never clobbered:
+
+```java
+} else if (!manager.fileExists("/root/.ssh/authorized_keys")) {
+    // migrate from /home/container/.ssh/authorized_keys ...
+}
+```
+
+To set keys deliberately, put them in config — it is the source of truth:
+
+```yaml
+dropbear:
+  authorized-key: "ssh-ed25519 AAAA...you@host"
+```
+
+**Recovering when already locked out.** With no shell access, drive it from the
+server console:
+
+```
+/sh cat /root/.ssh/authorized_keys
+/sh mkdir -p /root/.ssh && chmod 700 /root/.ssh && printf '%s\n' 'ssh-ed25519 AAAA...you@host' >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_keys && cat /root/.ssh/authorized_keys
+```
+
+or set `dropbear.authorized-key` and run `/harbor dropbear reinstall`.
+
+**Lesson.** A "repair" step that overwrites a credential file must first check
+whether the file is already good. Overwriting on every boot turns a one-off
+mistake into a recurring lockout.
+
+---
+
 ## Verification performed
 
 | Check | Result |

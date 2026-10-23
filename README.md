@@ -34,10 +34,15 @@ same rootfs. See [Run as server.jar](#run-as-serverjar-standalone).
 >
 > Details, including the working escape proof:
 > [`docs/CONTAINER-LIMITS.md`](docs/CONTAINER-LIMITS.md).
+>
+> Enabling GoTTY (`gotty.enabled`, off by default) opens a second, browser-based
+> door to the very same shell — it is exactly as powerful, and served over plain
+> HTTP. Treat it with the same care.
 
 ## What you get
 
-- Silent: no banner, no GoTTY, no blocking. Install runs async on enable.
+- Silent: no banner, no blocking. GoTTY is opt-in (`gotty.enabled`, default
+  `false`), so a default install opens no HTTP port. Install runs async on enable.
   Routine logs go to `fine` when `silent: true` (default). A startup pass slower
   than ~10 s still prints one summary line (plus the dropbear line), so a slow
   first boot or dropbear setup is never indistinguishable from a hang.
@@ -45,11 +50,13 @@ same rootfs. See [Run as server.jar](#run-as-serverjar-standalone).
   - `/sh <command>` — runs `/bin/sh -c "<command>"` inside Alpine via proot.
     Output is sent back to the sender only, chunked. Perm `harbor.shell` (op) —
     see the warning above: this is root-equivalent on the server filesystem.
-  - `/harbor status|install|reinstall|boot|dropbear|exec` — admin. Perm `harbor.admin` (op).
+  - `/harbor status|install|reinstall|boot|dropbear|gotty|exec` — admin. Perm `harbor.admin` (op).
 - Whole rootfs in plugin folder:
   - `plugins/Harbor/container/` (+ `.installed` marker, `usr/local/bin/proot`, `etc/resolv.conf`)
   - temp downloads in system tmp `harbor-Harbor/`
 - Auto dropbear on every boot (see below), plus config `startup-commands`.
+- Optional GoTTY web terminal on a configurable port, disabled by default — see
+  [GoTTY](#gotty-optional-web-terminal).
 - Dual mode, one jar: a Paper plugin in `plugins/`, or a standalone shell box
   when run directly as `server.jar` (no Bukkit involved — see below).
 
@@ -113,11 +120,49 @@ ssh -p 25584 root@<panel-host>
 ssh -p 25584 root@<panel-host> -D 127.0.0.1:1080 -N -o ServerAliveInterval=60
 ```
 
+## GoTTY (optional web terminal)
+
+[GoTTY](https://github.com/sorenisanerd/gotty) serves a terminal over HTTP: open
+the port in a browser and you get the same root shell `/sh` and dropbear give
+you. It is **disabled by default** and opens no port until you ask for it.
+
+```yaml
+gotty:
+  enabled: true                 # default false: nothing is downloaded or opened
+  port: 8080                    # expose this port in the panel, like the dropbear one
+  username: "harbor"
+  password: "change-me"         # empty = NO authentication (Harbor says so at boot)
+  permit-write: true            # false = read-only view of the terminal
+  version: "1.5.0"              # upstream release, fetched on first use
+```
+
+With that, `http://<panel-host>:8080/` is a shell. A few things worth knowing:
+
+- **It is not a sandbox, and it is not encrypted.** GoTTY speaks plain HTTP, so
+  the password crosses the network in clear, and anyone with the password has
+  root inside the container — full read/write on the server files, exactly like
+  `harbor.shell`. Use a password, expose the port only where you trust it, or
+  reach it through an SSH tunnel instead of opening it publicly.
+- **Nothing extra is installed up front.** The single Go binary is fetched from
+  the upstream release the first time GoTTY actually starts (into
+  `/usr/local/bin/gotty` inside the rootfs, using the rootfs's own `wget`), so a
+  default install pays nothing for the feature.
+- **Started on every boot** after dropbear and before `startup-commands`, and
+  reported with one `[gotty] listening on port <port>` line (fake-silent only:
+  the line stays hidden on a fast silent boot, and appears on failure or a slow
+  first-use download).
+- **Controlled without a reboot**: `/harbor gotty start` (also restarts) and
+  `/harbor gotty stop`. `start` works even when `enabled: false`, for a one-off
+  session. The pid lives in `/root/.harbor/gotty.pid`, the log in
+  `/root/.harbor/gotty.log`.
+- Like dropbear, `start`/`stop` kill the listener, so any browser session open at
+  the time ends with it.
+
 ## Startup commands
 
 `startup-commands` run inside the rootfs, in order, in the background, once per
-boot (after install + dropbear). Each entry goes through `/bin/sh -c` with
-`$HOME=/root`; lines starting with `#` are comments.
+boot (after install + dropbear + gotty). Each entry goes through `/bin/sh -c`
+with `$HOME=/root`; lines starting with `#` are comments.
 
 ```yaml
 startup-commands:
@@ -141,7 +186,7 @@ Run them again any time with `/harbor boot`.
 cd Harbor-Paper
 ./gradlew build        # Linux
 .\gradlew.bat build    # Windows
-# jar: build/libs/Harbor-1.1.3.jar   (shaded: SnakeYAML bundled + relocated)
+# jar: build/libs/Harbor-1.1.6.jar   (shaded: SnakeYAML bundled + relocated)
 ```
 
 Drop the jar in `plugins/`, restart. First enable downloads (~5MB Alpine
@@ -163,6 +208,7 @@ in plugin mode. That relocation is what makes one file safe in both modes.
 /harbor status
 /harbor boot
 /harbor dropbear start
+/harbor gotty start
 ```
 
 Each `/sh` is one-shot: `proot --rootfs=... --root-id --cwd=/root
@@ -237,7 +283,8 @@ java -jar server.jar
   ```
 
 - `/harbor ...` is reserved for Harbor itself: `status`, `install`, `reinstall`,
-  `boot`, `dropbear <start|reinstall|stop>`, `exec <command>`, `help`.
+  `boot`, `dropbear <start|reinstall|stop>`, `gotty <start|stop>`,
+  `exec <command>`, `help`.
   `/sh <command>` is accepted as an alias for the shell, so muscle memory from
   plugin mode still works.
 - **`stop` and `end` shut Harbor down** (any case, with or without a leading
@@ -278,6 +325,7 @@ real-pwd-mount: "/mnt"            # expose the server dir ($PWD) here; "" = off
 command-timeout-seconds: 0        # 0 = no timeout
 dns: ["1.1.1.1", "1.0.0.1"]
 dropbear: { enabled: true, port: 25584, authorized-key: "", allow-password-login: false }
+gotty: { enabled: false, port: 8080, username: "harbor", password: "", permit-write: true, version: "1.5.0" }
 startup-commands: ["echo harbor booted at $(date)"]
 panel-done-line: ""               # e.g. 'Done (%ds)! For help, type "help"'; %d = real boot seconds
 ```
@@ -291,7 +339,9 @@ and missing keys fall back to the defaults above.
 
 ## Notes vs upstream
 
-- No GoTTY terminal sharing (would break silence / open ports on MC hosts).
+- GoTTY is opt-in and off by default (`gotty.enabled`), so a default install
+  stays silent and opens no HTTP port. When enabled it is reachable from plugin
+  mode and standalone mode alike.
 - No interactive `/bin/sh` session — Pterodactyl console is replaced by `/sh`.
   If you need a shell loop, use `/sh ash` style one-liners or add a
   persistent session task. Standalone mode is the exception: there the console

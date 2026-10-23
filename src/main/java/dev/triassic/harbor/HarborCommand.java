@@ -11,7 +11,7 @@ import java.util.List;
 import java.util.Locale;
 
 /**
- * /harbor status | install | reinstall | exec &lt;cmd&gt;
+ * /harbor status | install | reinstall | exec &lt;cmd&gt; | boot | dropbear | gotty
  */
 public final class HarborCommand implements TabExecutor {
 
@@ -39,10 +39,15 @@ public final class HarborCommand implements TabExecutor {
                 sender.sendMessage("§7Dropbear: "
                         + (plugin.getConfig().getBoolean("dropbear.enabled", true) ? "enabled" : "disabled")
                         + " port " + plugin.getConfig().getInt("dropbear.port", 25584));
+                sender.sendMessage("§7GoTTY: "
+                        + (plugin.getConfig().getBoolean("gotty.enabled", false)
+                        ? "enabled port " + plugin.getConfig().getInt("gotty.port", 8080)
+                        : "disabled"));
                 sender.sendMessage("§7Startup cmds: §f"
                         + plugin.getConfig().getStringList("startup-commands").size());
                 sender.sendMessage("§7Use: §f/sh <command> §7e.g. §f/sh cat /etc/alpine-release");
-                sender.sendMessage("§7Boot tasks: §f/harbor boot §7| dropbear: §f/harbor dropbear <start|reinstall|stop>");
+                sender.sendMessage("§7Boot tasks: §f/harbor boot §7| dropbear: §f/harbor dropbear <start|reinstall|stop>"
+                        + " §7| gotty: §f/harbor gotty <start|stop>");
                 return true;
             }
             case "install": {
@@ -78,7 +83,7 @@ public final class HarborCommand implements TabExecutor {
                 return new ShCommand(plugin).onCommand(sender, command, "sh", rest);
             }
             case "boot": {
-                sender.sendMessage("§eRunning Harbor boot tasks (dropbear + startup-commands)...");
+                sender.sendMessage("§eRunning Harbor boot tasks (dropbear, gotty, startup-commands)...");
                 plugin.bootAsync(report -> plugin.getServer().getScheduler().runTask(plugin, () -> {
                     if (report.isEmpty()) {
                         sender.sendMessage("§7Nothing to do.");
@@ -147,8 +152,57 @@ public final class HarborCommand implements TabExecutor {
                 });
                 return true;
             }
+            case "gotty": {
+                if (args.length < 2) {
+                    sender.sendMessage("§eUsage: /" + label + " gotty <start|stop>");
+                    sender.sendMessage("§7start §8= (re)start the web terminal (downloads the binary on first use)");
+                    sender.sendMessage("§7stop §8= kill the web terminal");
+                    sender.sendMessage("§8Config: gotty.enabled, gotty.port, gotty.username, gotty.password");
+                    return true;
+                }
+                String action = args[1].toLowerCase(Locale.ROOT);
+                if (!action.equals("start") && !action.equals("stop")) {
+                    sender.sendMessage("§eUsage: /" + label + " gotty <start|stop>");
+                    return true;
+                }
+                if (!plugin.manager().isInstalled()) {
+                    sender.sendMessage("§cRootfs not installed yet.");
+                    return true;
+                }
+                if (action.equals("stop")) {
+                    sender.sendMessage("§eStopping GoTTY...");
+                    plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+                        Gotty.Result r = plugin.gotty().stop();
+                        plugin.getServer().getScheduler().runTask(plugin, () ->
+                                sender.sendMessage(r.ok
+                                        ? "§aStopped GoTTY."
+                                        : "§cCould not stop GoTTY: " + r.notes));
+                    });
+                    return true;
+                }
+                sender.sendMessage("§eStarting GoTTY on port "
+                        + plugin.getConfig().getInt("gotty.port", 8080)
+                        + " (first use downloads the binary)...");
+                plugin.getServer().getScheduler().runTaskAsynchronously(plugin, () -> {
+                    Gotty.Result r = plugin.gotty().start();
+                    final Gotty.Result result = r;
+                    plugin.getServer().getScheduler().runTask(plugin, () -> {
+                        sender.sendMessage(result.ok
+                                ? "§aGoTTY listening on port " + result.port
+                                : "§cGoTTY start failed.");
+                        if (!result.notes.isEmpty()) {
+                            sender.sendMessage("§eNotes: " + result.notes);
+                        }
+                        if (result.ok) {
+                            sender.sendMessage("§7Open: §fhttp://<panel-host>:" + result.port
+                                    + " §8(the panel must expose that port)");
+                        }
+                    });
+                });
+                return true;
+            }
             default:
-                sender.sendMessage("§eUsage: /" + label + " <status|install|reinstall|boot|dropbear|exec>");
+                sender.sendMessage("§eUsage: /" + label + " <status|install|reinstall|boot|dropbear|gotty|exec>");
                 return true;
         }
     }
@@ -156,10 +210,13 @@ public final class HarborCommand implements TabExecutor {
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
-            return Arrays.asList("status", "install", "reinstall", "boot", "dropbear", "exec");
+            return Arrays.asList("status", "install", "reinstall", "boot", "dropbear", "gotty", "exec");
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("dropbear")) {
             return Arrays.asList("start", "reinstall", "stop");
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("gotty")) {
+            return Arrays.asList("start", "stop");
         }
         return Collections.emptyList();
     }

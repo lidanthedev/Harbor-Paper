@@ -11,13 +11,14 @@ import java.util.function.Consumer;
  * Harbor — Paper port of RealTriassic/Harbor.
  *
  * - Whole Alpine rootfs lives in plugins/Harbor/container (+ .installed marker).
- * - Silent: no banner, no GoTTY, install + /sh run async with fine-level logging.
+ * - Silent: no banner, GoTTY off unless enabled, install + /sh run async with fine-level logging.
  * - Normal commands: /sh &lt;command&gt; runs via proot /bin/sh -c, output goes back to sender.
  */
 public final class HarborPlugin extends JavaPlugin {
 
     private HarborManager harborManager;
     private Dropbear dropbear;
+    private Gotty gotty;
     private HarborBoot harborBoot;
     private final AtomicBoolean installRunning = new AtomicBoolean(false);
     private final AtomicBoolean bootRunning = new AtomicBoolean(false);
@@ -27,7 +28,8 @@ public final class HarborPlugin extends JavaPlugin {
         saveDefaultConfig();
         this.harborManager = new HarborManager(getDataFolder(), new BukkitConfig(getConfig()), getLogger());
         this.dropbear = new Dropbear(harborManager);
-        this.harborBoot = new HarborBoot(harborManager, dropbear);
+        this.gotty = new Gotty(harborManager);
+        this.harborBoot = new HarborBoot(harborManager, dropbear, gotty);
 
         if (getCommand("sh") != null) {
             ShCommand sh = new ShCommand(this);
@@ -59,6 +61,10 @@ public final class HarborPlugin extends JavaPlugin {
         return dropbear;
     }
 
+    public Gotty gotty() {
+        return gotty;
+    }
+
     public boolean isSilent() {
         return getConfig().getBoolean("silent", true);
     }
@@ -66,7 +72,8 @@ public final class HarborPlugin extends JavaPlugin {
     /**
      * Harbor boot sequence, runs once per server start after the rootfs exists:
      *   1. auto-configure + start dropbear
-     *   2. run config `startup-commands` in the background
+     *   2. start GoTTY when `gotty.enabled` (off by default)
+     *   3. run config `startup-commands` in the background
      * Never blocks; safe to call repeatedly. Called by /harbor boot, so a manual
      * pass reports its own duration.
      */
@@ -101,6 +108,19 @@ public final class HarborPlugin extends JavaPlugin {
                         getLogger().info(boot.dropbearLine);
                     } else {
                         getLogger().fine(boot.dropbearLine);
+                    }
+                }
+                if (boot.gottyLine != null) {
+                    report.add(boot.gottyLine);
+                    // Same rule as dropbear: quiet on a fast success, visible
+                    // when it failed, when the operator asked for chatter, or
+                    // when the first-use binary download made the pass slow.
+                    boolean verbose = !isSilent() || !boot.gottyOk
+                            || took >= HarborBoot.SLOW_STARTUP_SECONDS;
+                    if (verbose) {
+                        getLogger().info(boot.gottyLine);
+                    } else {
+                        getLogger().fine(boot.gottyLine);
                     }
                 }
                 report.addAll(boot.startupLines);

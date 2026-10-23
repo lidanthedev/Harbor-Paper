@@ -727,6 +727,22 @@ stays self-healing without doing package work on every restart.
 other processes' argv — including your own. Prefer pid files, or `pkill -x` on a
 process name.
 
+### GoTTY — same daemon rules, different pid source
+
+GoTTY (`gotty.enabled`, `/harbor gotty start|stop`) is launched through the same
+`detach()` path as dropbear, so the pre-flight check, the in-rootfs log and the
+silent-by-default reporting are identical. Two things are specific to it:
+
+- **No pid-file flag.** gotty has no `-P` equivalent, so the shell that starts it
+  writes its own pid *before* `exec`ing the binary:
+  `echo $$ > /root/.harbor/gotty.pid; exec gotty …`. `exec` keeps the pid, so the
+  file holds gotty's pid, and `stop` checks `/proc/<pid>/comm` before killing —
+  the same "never trust a bare pid" rule as Problem 20 and Problem 25.
+- **Fetched on first use, not at install.** The binary is a single static Go
+  executable, downloaded from the upstream release with the rootfs's own
+  `wget`/`tar` the first time it actually starts. A default install
+  (`gotty.enabled: false`) downloads nothing and opens no port.
+
 ---
 
 ## Installing a toolchain (`apk add gcc` / `build-base`)
@@ -1493,9 +1509,14 @@ bare-message fix and re-verified, hence the same asset name in two md5s.
 - **Linux only.** proot static binaries are Linux-only; the plugin refuses
   cleanly on Windows/macOS.
 - **x86_64 / aarch64 only.**
-- **No GoTTY / interactive shell.** Deliberately omitted to keep the plugin
-  silent and to avoid opening extra ports. `/sh` is one-shot; use one-liners or
-  background a service via `startup-commands`.
+- **No persistent shell in the game console; GoTTY is opt-in.** `/sh` is
+  one-shot; use one-liners or background a service via `startup-commands`. Setting
+  `gotty.enabled: true` starts a browser terminal on `gotty.port` at boot. It is
+  off by default, so a default install downloads nothing extra and opens no port.
+  When on it is a second root door over **plain HTTP**: without `gotty.password`
+  it is passwordless, and with one the password still crosses the network in
+  clear. Set a password and expose the port only where you trust it (README →
+  GoTTY).
 - **dropbear does not self-revive across a container restart.** It is started
   once per Harbor boot. If the *container* restarts (not just the server), run
   `/harbor dropbear start` (or restart the server so boot tasks re-run).
@@ -1546,13 +1567,14 @@ bare-message fix and re-verified, hence the same asset name in two md5s.
 | `HarborPlugin.java` | plugin front-end: `onEnable`, silent async install → boot, `bootAsync`, `ensureInstalledAsync` |
 | `HarborMain.java` | standalone front-end: `Main-Class`, data folder + config bootstrap, boot, console |
 | `HarborConsole.java` | standalone console loop: `/harbor` management, everything else → rootfs shell |
-| `HarborBoot.java` | shared dropbear → `startup-commands` boot sequence |
+| `HarborBoot.java` | shared dropbear → gotty → `startup-commands` boot sequence |
 | `HarborConfig.java` / `BukkitConfig.java` / `YamlConfig.java` | config abstraction: Bukkit-backed (plugin) and SnakeYAML-backed (standalone) |
 | `HarborManager.java` | proot exec, install/download, env pinning, timeout + drain logic, `detach()` |
 | `Dropbear.java` | packages, host keys, key conversion, `authorized_keys`, launch, reporting |
+| `Gotty.java` | optional web terminal: on-demand binary fetch, launch via `detach()`, pid-file stop, reporting |
 | `ShCommand.java` | `/sh` with `harbor.shell`, unlimited default timeout, chunked output |
-| `HarborCommand.java` | `/harbor status\|install\|reinstall\|boot\|dropbear\|exec` |
-| `src/main/resources/config.yml` | versions, timeout, `proot-link2symlink`, `real-pwd-mount`, `dropbear:` block, `startup-commands:` |
+| `HarborCommand.java` | `/harbor status\|install\|reinstall\|boot\|dropbear\|gotty\|exec` |
+| `src/main/resources/config.yml` | versions, timeout, `proot-link2symlink`, `real-pwd-mount`, `dropbear:` block, `gotty:` block, `startup-commands:` |
 | `src/main/resources/plugin.yml` | commands + `harbor.shell` / `harbor.admin` |
 | `build.gradle` | Gradle build, `paper-api` `compileOnly`, Shadow + relocated SnakeYAML, `Main-Class` |
 

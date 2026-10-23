@@ -6,7 +6,8 @@ import java.util.List;
 /**
  * The Harbor boot sequence, shared by plugin mode and standalone mode:
  *   1. auto-configure + start dropbear
- *   2. run config `startup-commands`
+ *   2. start GoTTY when `gotty.enabled` (off by default)
+ *   3. run config `startup-commands`
  *
  * Bukkit-free on purpose: {@link HarborPlugin} calls it from an async task,
  * {@link HarborMain} calls it on the main thread before the console loop.
@@ -28,21 +29,29 @@ public final class HarborBoot {
         /** "[dropbear] listening on port N | <fingerprint>", or null when disabled. */
         public final String dropbearLine;
         public final boolean dropbearOk;
+        /** "[gotty] listening on port N", or null when disabled. */
+        public final String gottyLine;
+        public final boolean gottyOk;
         public final List<String> startupLines;
 
-        BootReport(String dropbearLine, boolean dropbearOk, List<String> startupLines) {
+        BootReport(String dropbearLine, boolean dropbearOk, String gottyLine, boolean gottyOk,
+                   List<String> startupLines) {
             this.dropbearLine = dropbearLine;
             this.dropbearOk = dropbearOk;
+            this.gottyLine = gottyLine;
+            this.gottyOk = gottyOk;
             this.startupLines = startupLines;
         }
     }
 
     private final HarborManager manager;
     private final Dropbear dropbear;
+    private final Gotty gotty;
 
-    public HarborBoot(HarborManager manager, Dropbear dropbear) {
+    public HarborBoot(HarborManager manager, Dropbear dropbear, Gotty gotty) {
         this.manager = manager;
         this.dropbear = dropbear;
+        this.gotty = gotty;
     }
 
     /**
@@ -78,6 +87,24 @@ public final class HarborBoot {
         }
 
         List<String> startupLines;
+        String gottyLine = null;
+        boolean gottyOk = true;
+        try {
+            if (gotty.isEnabled()) {
+                if (progress != null) {
+                    progress.accept("[Harbor] starting gotty (web terminal) ...");
+                }
+                Gotty.Result g = gotty.start();
+                gottyOk = g.ok;
+                gottyLine = "[gotty] " + (g.ok ? "listening" : "FAILED")
+                        + " on port " + g.port
+                        + (g.notes.isEmpty() ? "" : " | " + g.notes);
+            }
+        } catch (Exception e) {
+            gottyOk = false;
+            gottyLine = "[gotty] FAILED: " + e;
+        }
+
         try {
             List<String> commands = manager.config().getStringList("startup-commands");
             if (!commands.isEmpty() && progress != null) {
@@ -88,7 +115,7 @@ public final class HarborBoot {
             startupLines = new ArrayList<>();
             startupLines.add("[startup] failed: " + e);
         }
-        return new BootReport(dropbearLine, dropbearOk, startupLines);
+        return new BootReport(dropbearLine, dropbearOk, gottyLine, gottyOk, startupLines);
     }
 
     /** Boot with no progress reporting (plugin mode logs its own way). */

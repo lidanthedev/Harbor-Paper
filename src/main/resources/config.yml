@@ -1,9 +1,10 @@
 # Harbor (Paper port of RealTriassic/Harbor)
 # Whole rootfs lives in plugins/Harbor/container, marker file .installed included.
-# Silent by default: only fine-level logging, no banner, no GoTTY.
+# Silent by default: only fine-level logging, no banner. GoTTY is opt-in
+# (gotty.enabled, off by default) and opens no port until you turn it on.
 #
 # This one file is read in both modes:
-#   * plugin  - Paper loads plugins/Harbor-1.1.0.jar and registers /sh + /harbor
+#   * plugin  - Paper loads plugins/Harbor-<version>.jar and registers /sh + /harbor
 #   * standalone - the jar launched directly (java -jar, e.g. renamed server.jar):
 #     plugins/Harbor is still created next to the jar, and every line typed into
 #     the console is run in the rootfs ("/harbor ..." manages Harbor).
@@ -76,6 +77,36 @@ dropbear:
   authorized-key: ""
   # false = key-only auth (-g), which is what you want. true only for debugging.
   allow-password-login: false
+
+# ---------------------------------------------------------------------------
+# Optional GoTTY: a browser terminal into the rootfs. Disabled by default.
+#
+# GoTTY serves an interactive shell over HTTP on the given port, so anyone who
+# can reach that port gets root inside the container - full read/write on the
+# server files, exactly like /sh and dropbear (see docs/CONTAINER-LIMITS.md).
+# Keep it off unless you need it; when you enable it, set a password and expose
+# the port only where you trust it. Plain HTTP: the password travels in clear.
+#
+# The binary is fetched from the GoTTY release the first time it actually runs,
+# never at install time, so a default install downloads nothing extra. It lives
+# at /usr/local/bin/gotty inside the rootfs and logs to /root/.harbor/gotty.log.
+# Manage it at runtime with /harbor gotty <start|stop>.
+# ---------------------------------------------------------------------------
+gotty:
+  enabled: false
+  # Cannot bind ports below 1024 in this container. The panel must expose it
+  # the same way it exposes the dropbear port.
+  port: 8080
+  # HTTP basic auth ("<username>:<password>"). An empty password means NO
+  # authentication at all: the root shell is open to anyone who can reach the
+  # port, and Harbor says so in the boot line.
+  username: "harbor"
+  password: ""
+  # true = browsers can type into the shell (needed to actually use it).
+  # false = read-only view of the terminal output.
+  permit-write: true
+  # GoTTY release fetched on first use (sorenisanerd/gotty, linux amd64/arm64).
+  version: "1.5.0"
 
 # ---------------------------------------------------------------------------
 # Commands run inside the rootfs, in order, in the background, once per boot

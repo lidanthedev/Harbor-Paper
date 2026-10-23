@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicReference;
  * rootfs shell, exactly like /sh does in plugin mode.
  *
  * "/harbor ..." is reserved for Harbor itself (status, install, reinstall, boot,
- * dropbear, exec, help). "/sh ..." is accepted as an alias for the shell so
+ * dropbear, gotty, exec, help). "/sh ..." is accepted as an alias for the shell so
  * muscle memory from plugin mode still works. "stop" and "end" (with or without
  * a leading slash) shut the process down, because that is what a hosting panel
  * types into stdin to stop a Minecraft or Velocity server. Nothing else is
@@ -31,6 +31,7 @@ public final class HarborConsole {
 
     private final HarborManager manager;
     private final Dropbear dropbear;
+    private final Gotty gotty;
     private final HarborBoot boot;
     private final BlockingQueue<String> queue = new LinkedBlockingQueue<>();
     /** true until the background install + boot pass finishes. */
@@ -49,9 +50,10 @@ public final class HarborConsole {
      */
     private volatile long bootSeconds = -1;
 
-    public HarborConsole(HarborManager manager, Dropbear dropbear, HarborBoot boot) {
+    public HarborConsole(HarborManager manager, Dropbear dropbear, Gotty gotty, HarborBoot boot) {
         this.manager = manager;
         this.dropbear = dropbear;
+        this.gotty = gotty;
         this.boot = boot;
     }
 
@@ -193,6 +195,9 @@ public final class HarborConsole {
                 out("Dropbear: "
                         + (manager.config().getBoolean("dropbear.enabled", true) ? "enabled" : "disabled")
                         + " port " + manager.config().getInt("dropbear.port", 25584));
+                out("GoTTY: " + (manager.config().getBoolean("gotty.enabled", false)
+                        ? "enabled port " + manager.config().getInt("gotty.port", 8080)
+                        : "disabled"));
                 out("Startup cmds: " + manager.config().getStringList("startup-commands").size());
                 out("Mode: standalone - console lines run in the rootfs, /harbor manages Harbor");
                 return;
@@ -229,6 +234,9 @@ public final class HarborConsole {
                 if (r.dropbearLine != null) {
                     out(r.dropbearLine);
                 }
+                if (r.gottyLine != null) {
+                    out(r.gottyLine);
+                }
                 for (String l : r.startupLines) {
                     out(l);
                 }
@@ -264,6 +272,28 @@ public final class HarborConsole {
                         + (r.notes.isEmpty() ? "" : " | " + r.notes));
                 return;
             }
+            case "gotty": {
+                if (!manager.isInstalled()) {
+                    out("rootfs not installed yet");
+                    return;
+                }
+                String action = rest.toLowerCase(Locale.ROOT);
+                Gotty.Result r;
+                switch (action) {
+                    case "start":
+                        r = gotty.start();
+                        break;
+                    case "stop":
+                        r = gotty.stop();
+                        break;
+                    default:
+                        out("usage: /harbor gotty <start|stop>");
+                        return;
+                }
+                out((r.ok ? "gotty ok" : "gotty FAILED") + " on port " + r.port
+                        + (r.notes.isEmpty() ? "" : " | " + r.notes));
+                return;
+            }
             case "exec": {
                 if (rest.isEmpty()) {
                     out("usage: /harbor exec <command>");
@@ -288,6 +318,7 @@ public final class HarborConsole {
         out("/harbor install | reinstall");
         out("/harbor boot");
         out("/harbor dropbear <start|reinstall|stop>");
+        out("/harbor gotty <start|stop>");
         out("/harbor exec <command>");
     }
 

@@ -58,19 +58,28 @@ public final class HarborMain {
 
         HarborManager manager = new HarborManager(dataDir, config, logger);
         Dropbear dropbear = new Dropbear(manager);
-        HarborBoot boot = new HarborBoot(manager, dropbear);
+        Gotty gotty = new Gotty(manager);
+        HarborBoot boot = new HarborBoot(manager, dropbear, gotty);
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             try {
-                if (manager.isInstalled() && manager.isLinux() && dropbear.isEnabled()) {
-                    dropbear.stop();
+                if (manager.isInstalled() && manager.isLinux()) {
+                    // Kill the listeners Harbor started so a restart does not
+                    // find the ports taken. The rest of the rootfs dies with
+                    // the container.
+                    if (dropbear.isEnabled()) {
+                        dropbear.stop();
+                    }
+                    if (gotty.isEnabled()) {
+                        gotty.stop();
+                    }
                 }
             } catch (Throwable ignored) {
                 // container is going away; nothing useful to do
             }
         }, "harbor-shutdown"));
 
-        HarborConsole console = new HarborConsole(manager, dropbear, boot);
+        HarborConsole console = new HarborConsole(manager, dropbear, gotty, boot);
 
         // Install + boot run in the background so the console accepts input
         // immediately. Doing this inline made the whole program look hung for
@@ -112,6 +121,12 @@ public final class HarborMain {
                     // The dropbear line is the SSH entry point: always show it.
                     if (report.dropbearLine != null) {
                         System.out.println(report.dropbearLine);
+                        System.out.flush();
+                    }
+                    // Only exists when gotty.enabled, so a default boot stays
+                    // as quiet as before.
+                    if (report.gottyLine != null) {
+                        System.out.println(report.gottyLine);
                         System.out.flush();
                     }
                     booted = true;
